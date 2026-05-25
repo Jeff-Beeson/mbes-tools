@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Environments
+.env
+.venv
+venv/
+env/
+.conda/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data files (libraries never commit data; test fixtures go under tests/fixtures/ explicitly)
+*.kmall
+*.kmwcd
+*.all
+*.wcd
+*.sgy
+*.segy
+*.tif
+*.tiff
+*.bag
+*.nc
+*.grd
+*.xyz
+*.mbxyz
+*.mb??
+*.h5
+*.hdf5
+*.mat
+*.npy
+*.npz
+*.pkl
+*.pickle

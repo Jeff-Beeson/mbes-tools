@@ -1,0 +1,12 @@
+name: mbes-tools
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - numpy
+  - pip
+  - pytest
+  # Module dependencies will get added here as we build out:
+  #   - pyproj      (for coordinate transforms in some readers)
+  #   - rasterio    (for grids if mbsystem.py needs them)
+  #   - pandas      (for tabular helpers)
