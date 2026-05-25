@@ -53,3 +53,9 @@ Thumbs.db
 *.npz
 *.pkl
 *.pickle
+
+# Exception: small clipped fixtures committed for parser tests.
+!tests/fixtures/**/*.kmall
+!tests/fixtures/**/*.kmwcd
+!tests/fixtures/**/*.all
+!tests/fixtures/**/*.wcd

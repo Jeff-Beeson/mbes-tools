@@ -188,3 +188,63 @@ def test_parse_seabed_image_roundtrip(tmp_path):
 def test_iter_all_files_on_missing_path_raises():
     with pytest.raises(FileNotFoundError):
         mbes_all.iter_all_files(Path("/nonexistent/path/that/does/not/exist"))
+
+
+# ---------------------------------------------------------------------------
+# Fixture-based integration tests.
+# Source: tests/fixtures/sample_nautilus.all, clipped from a Nautilus
+# (E/V Nautilus, 2025-05-07) Kongsberg .all via
+# tests/fixtures/clip_datagrams.py --pings 3.
+# ---------------------------------------------------------------------------
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture
+def sample_all():
+    """Path to the committed sample_nautilus.all, or skip if absent."""
+    p = FIXTURES / "sample_nautilus.all"
+    if not p.exists():
+        pytest.skip(f"Fixture not present: {p}")
+    return p
+
+
+def test_fixture_total_datagram_count(sample_all):
+    """Clipper reported 154 datagrams in the clip; iterator should match."""
+    records = list(mbes_all.iter_datagrams(sample_all))
+    assert len(records) == 154
+
+
+def test_fixture_depth_pings(sample_all):
+    """Clipper stopped after 3 X (depth) datagrams; parser should find them."""
+    pings = list(mbes_all.iter_depth_datagrams(sample_all))
+    assert len(pings) == 3
+    for ping in pings:
+        assert ping.num_beams > 0
+        assert ping.num_valid_detections > 0
+        assert ping.num_valid_detections <= ping.num_beams
+        assert ping.sound_speed_at_transducer_m_s > 1400  # reasonable seawater range
+        assert ping.sound_speed_at_transducer_m_s < 1600
+        assert len(ping.beams) == ping.num_beams
+
+
+def test_fixture_seabed_image_pings(sample_all):
+    """Real survey should yield at least one Y (seabed image) datagram."""
+    y_records = list(mbes_all.iter_seabed_image_datagrams(sample_all))
+    assert len(y_records) > 0
+    for y in y_records:
+        assert y.num_beams > 0
+        assert len(y.beams) == y.num_beams
+        # At least one beam should carry samples.
+        total_samples = sum(b.number_of_samples_per_beam for b in y.beams)
+        assert total_samples > 0
+
+
+def test_fixture_position_records_have_valid_coords(sample_all):
+    """P datagrams should carry real-world lat/lon."""
+    positions = list(mbes_all.iter_position_datagrams(sample_all))
+    assert len(positions) > 0
+    for p in positions:
+        assert -90.0 <= p.latitude_deg <= 90.0
+        assert -180.0 <= p.longitude_deg <= 180.0
+        assert 0.0 <= p.heading_deg < 360.0

@@ -82,8 +82,61 @@ def test_iter_kmall_files_on_missing_path_raises():
         kmall.iter_kmall_files(Path("/nonexistent/path/that/does/not/exist"))
 
 
-# TODO: add end-to-end MRZ parser test once a small .kmall fixture is
-# committed under tests/fixtures/. Plan:
-# - clip a few pings (~3-5) from a Monterey Canyon .kmall to keep size small
-# - parse it, assert ping count, depth_modes, num_tx_sectors, sounding counts
-# - assert lat/lon are present and within Monterey Bay bounding box
+# ---------------------------------------------------------------------------
+# Fixture-based integration tests.
+# Source: tests/fixtures/sample_dpdk027.kmall, clipped from MBARI DPDK027
+# (David Packard, EM 2040 dual head, Monterey Canyon, 2025-11-12) via
+# tests/fixtures/clip_datagrams.py --mrz 2.
+# ---------------------------------------------------------------------------
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture
+def sample_kmall():
+    """Path to the committed sample_dpdk027.kmall, or skip if absent."""
+    p = FIXTURES / "sample_dpdk027.kmall"
+    if not p.exists():
+        pytest.skip(f"Fixture not present: {p}")
+    return p
+
+
+def test_fixture_mrz_count(sample_kmall):
+    """Clipper stopped after 2 #MRZ datagrams; parser should find them both."""
+    datagrams = list(kmall.iter_mrz_datagrams(sample_kmall))
+    assert len(datagrams) == 2
+
+
+def test_fixture_mrz_structure(sample_kmall):
+    """Each parsed MRZ should have sensible structural metadata."""
+    for dgm in kmall.iter_mrz_datagrams(sample_kmall):
+        assert dgm.num_tx_sectors > 0
+        assert dgm.rx_fans_per_ping > 0
+        assert dgm.depth_mode >= 0
+        # EM2040 systems typically use depth modes 0-7 (raw) or 100-107 (manual).
+        # After normalization the value should land in the 0-30 range.
+        assert dgm.depth_mode < 30
+        assert len(dgm.soundings) > 0
+
+
+def test_fixture_mrz_geolocation(sample_kmall):
+    """Lat/lon should be present and within the Monterey Bay bounding box."""
+    datagrams = list(kmall.iter_mrz_datagrams(sample_kmall))
+    geolocated = [d for d in datagrams if d.latitude_deg is not None]
+    assert len(geolocated) > 0, "No MRZ datagrams carried lat/lon"
+
+    # Monterey Bay & Monterey Canyon (canyon axis extends well offshore):
+    # ~36-37 N, -123 W to -121.5 W.
+    for dgm in geolocated:
+        assert 36.0 < dgm.latitude_deg < 37.5, f"lat out of range: {dgm.latitude_deg}"
+        assert -123.0 < dgm.longitude_deg < -121.5, f"lon out of range: {dgm.longitude_deg}"
+
+
+def test_fixture_mrz_soundings_have_valid_detections(sample_kmall):
+    """A real DPDK027 ping should have plenty of valid detections."""
+    for dgm in kmall.iter_mrz_datagrams(sample_kmall):
+        valid_count = sum(1 for s in dgm.soundings if s.is_valid)
+        # EM2040 with ~500 beams should have hundreds of valid detections.
+        assert valid_count > 100, (
+            f"Ping {dgm.ping_cnt} has only {valid_count} valid soundings"
+        )
