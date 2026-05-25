@@ -1,9 +1,525 @@
-"""Kongsberg .all reader.
+"""Kongsberg .all reader: native binary parser.
 
-Will fork / build on Mike's pyall and pyAllConditioner.
+This module reads Kongsberg .all datagrams directly using ``struct``,
+same approach as :mod:`mbes_tools.kmall`. No third-party dependency.
 
-Status: stub. Plan is to fork pyAllConditioner-master into Jeff's GitHub,
-then either depend on the fork or vendor a stripped-down core here.
+Source: written from the public Kongsberg EM Series Data Format
+specification (October 2013). Cross-referenced against
+``guardiangeomatics/pyall`` (Apache-2.0, Paul Kennedy) on 2026-05-25 for
+edge cases in the per-beam record layouts.
+
+Status: v0. The datagram envelope plus the most-used datagram types are
+supported:
+
+- ``P`` position
+- ``X`` depth (XYZ datagram)
+- ``Y`` seabed image (per-beam backscatter samples)
+
+Other datagram types in a .all file are skipped by their declared byte
+length (graceful skip; the iterator does not raise on unsupported types).
+Add more parsers (``A`` attitude, ``R`` runtime, ``I`` installation,
+``N`` raw range, etc.) as projects need them.
+
+Typical usage::
+
+    from pathlib import Path
+    from mbes_tools.all import iter_seabed_image_datagrams
+
+    for dgm in iter_seabed_image_datagrams(Path("survey.all")):
+        for beam in dgm.beams:
+            ...  # beam.samples is a tuple of int16 amplitude samples
 """
 
-raise NotImplementedError("mbes_tools.all not yet implemented")
+from __future__ import annotations
+
+import struct
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterator, List, Optional, Tuple
+
+
+# ---------------------------------------------------------------------------
+# Datagram type codes (single ASCII characters).
+# ---------------------------------------------------------------------------
+
+DGM_TYPE_POSITION = b"P"
+DGM_TYPE_DEPTH = b"X"
+DGM_TYPE_SEABED_IMAGE = b"Y"
+
+# Constants from the Kongsberg envelope.
+STX = 0x02
+ETX = 0x03
+
+
+# ---------------------------------------------------------------------------
+# Binary structure definitions.
+# ---------------------------------------------------------------------------
+
+# Datagram envelope header: numberOfBytes, STX, typeOfDatagram, emModel, date, time.
+# numberOfBytes excludes itself, so total datagram size = numberOfBytes + 4.
+DGM_HEADER_FMT = "<LBBHLL"
+DGM_HEADER_SIZE = struct.calcsize(DGM_HEADER_FMT)
+
+# Datagram footer: ETX (uint8) + checksum (uint16). Sometimes preceded by a
+# spare alignment byte; the per-datagram parsers handle that locally.
+DGM_FOOTER_FMT = "<BH"
+DGM_FOOTER_SIZE = struct.calcsize(DGM_FOOTER_FMT)
+
+# P position datagram body (after envelope header, before footer):
+# counter, serialNumber, lat*2e7, lon*1e7, quality*100, sog*100, cog*100,
+# heading*100, descriptor, NBytesInInputDatagram.
+P_BODY_FMT = "<HHll4HBB"
+P_BODY_SIZE = struct.calcsize(P_BODY_FMT)
+
+# X depth datagram body (after envelope header, before per-beam loop):
+# counter, serialNumber, heading*100, soundSpeed*10, transducerDepth (f32),
+# nBeams, nValidDetections, sampleFreq (f32), scanningInfo, spare1, spare2, spare3.
+X_BODY_FMT = "<4Hf2Hf4B"
+X_BODY_SIZE = struct.calcsize(X_BODY_FMT)
+
+# X per-beam record:
+# depth (f32), acrossTrack (f32), alongTrack (f32), detectionWindowLen (u16),
+# qualityFactor (u8), beamIncidenceAngleAdjustment*10 (u8), detectionInfo (u8),
+# realtimeCleaningInfo (i8), reflectivity*10 (i16).
+X_BEAM_FMT = "<fffHBBBbh"
+X_BEAM_SIZE = struct.calcsize(X_BEAM_FMT)
+
+# Y seabed image datagram body (after envelope header, before per-beam loop):
+# counter, serialNumber, sampleFreq (f32), rangeToNormalIncidence (u16),
+# normalIncidence (i16), oblique (i16), txBeamWidth*10 (u16),
+# tvgCrossover*10 (u16), numBeams (u16).
+Y_BODY_FMT = "<HHfHhhHHH"
+Y_BODY_SIZE = struct.calcsize(Y_BODY_FMT)
+
+# Y per-beam record (header before the variable-length sample array):
+# sortingDirection (i8), detectionInfo (u8), numberOfSamplesPerBeam (u16),
+# centreSampleNumber (u16).
+Y_BEAM_FMT = "<bBHH"
+Y_BEAM_SIZE = struct.calcsize(Y_BEAM_FMT)
+
+
+# ---------------------------------------------------------------------------
+# Data classes for the parsed records.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DatagramHeader:
+    """The 12-byte envelope header that prefixes every Kongsberg .all datagram."""
+
+    number_of_bytes: int  # excludes itself; total datagram size on disk = this + 4
+    stx: int              # always 0x02
+    type_of_datagram: str # single ASCII character, e.g. 'P', 'X', 'Y'
+    em_model: int         # Kongsberg model number, e.g. 302, 710, 2040
+    record_date: int      # YYYYMMDD as integer
+    record_time_ms: int   # time of day in milliseconds since midnight
+
+    @property
+    def time_seconds(self) -> float:
+        """Time of day in seconds since midnight."""
+        return self.record_time_ms / 1000.0
+
+
+@dataclass
+class DatagramRecord:
+    """A raw datagram from a .all file: envelope plus the body bytes.
+
+    Use this when iterating with :func:`iter_datagrams` and you want to
+    handle datagram types yourself or skip ones with no parser yet.
+    """
+
+    header: DatagramHeader
+    offset: int           # byte offset of the start of the datagram in the file
+    body: bytes           # raw bytes between the envelope header and the footer
+
+
+@dataclass
+class PositionDatagram:
+    """Parsed ``P`` position datagram."""
+
+    header: DatagramHeader
+    counter: int
+    serial_number: int
+    latitude_deg: float
+    longitude_deg: float
+    position_fix_quality_m: float
+    speed_over_ground_m_s: float
+    course_over_ground_deg: float
+    heading_deg: float
+    descriptor: int
+    input_datagram: bytes  # raw bytes of the embedded position-system message (e.g. NMEA)
+
+
+@dataclass
+class XBeam:
+    """One beam in an ``X`` depth datagram."""
+
+    depth_m: float
+    across_track_m: float
+    along_track_m: float
+    detection_window_length: int
+    quality_factor: int
+    beam_incidence_angle_adjustment_deg: float
+    detection_information: int
+    realtime_cleaning_information: int
+    reflectivity_db: float
+
+
+@dataclass
+class DepthDatagram:
+    """Parsed ``X`` depth (XYZ) datagram. The XYZ datagram is the modern
+    sounding record for EM 2040 / EM 710 / EM 302 / EM 304 systems."""
+
+    header: DatagramHeader
+    counter: int
+    serial_number: int
+    heading_deg: float
+    sound_speed_at_transducer_m_s: float
+    transducer_depth_m: float
+    num_beams: int
+    num_valid_detections: int
+    sample_frequency_hz: float
+    scanning_info: int
+    beams: List[XBeam] = field(default_factory=list)
+
+
+@dataclass
+class YBeam:
+    """One beam in a ``Y`` seabed image datagram. ``samples`` is the per-beam
+    int16 amplitude array (units 0.1 dB)."""
+
+    sorting_direction: int
+    detection_info: int
+    number_of_samples_per_beam: int
+    centre_sample_number: int
+    samples: Tuple[int, ...] = field(default_factory=tuple)
+
+
+@dataclass
+class SeabedImageDatagram:
+    """Parsed ``Y`` seabed image datagram. Carries per-beam backscatter
+    amplitude samples; this is the datagram backscatter analysis pulls from."""
+
+    header: DatagramHeader
+    counter: int
+    serial_number: int
+    sample_frequency_hz: float
+    range_to_normal_incidence_samples: int
+    normal_incidence_bs_db: int
+    oblique_bs_db: int
+    tx_beam_width_deg: float
+    tvg_crossover_deg: float
+    num_beams: int
+    beams: List[YBeam] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Low-level read helpers.
+# ---------------------------------------------------------------------------
+
+
+def _unpack(fmt: str, buf: bytes, offset: int = 0):
+    """``struct.unpack_from`` shorthand."""
+    return struct.unpack_from(fmt, buf, offset)
+
+
+def _read_header(fid) -> Optional[DatagramHeader]:
+    """Read a 12-byte envelope from the current file position.
+
+    Returns ``None`` at clean EOF.
+    """
+    raw = fid.read(DGM_HEADER_SIZE)
+    if len(raw) < DGM_HEADER_SIZE:
+        return None
+
+    nbytes, stx, type_code, em_model, date, time_ms = struct.unpack(DGM_HEADER_FMT, raw)
+    return DatagramHeader(
+        number_of_bytes=nbytes,
+        stx=stx,
+        type_of_datagram=chr(type_code),
+        em_model=em_model,
+        record_date=date,
+        record_time_ms=time_ms,
+    )
+
+
+# ---------------------------------------------------------------------------
+# File discovery.
+# ---------------------------------------------------------------------------
+
+
+def iter_all_files(path: Path, recursive: bool = False) -> List[Path]:
+    """Return ``.all`` files from a file or directory.
+
+    Args:
+        path: A single file or a directory.
+        recursive: If True, search subdirectories.
+
+    Returns:
+        Sorted, de-duplicated list of paths.
+    """
+    if path.is_file():
+        return [path]
+
+    if not path.is_dir():
+        raise FileNotFoundError(f"Input path does not exist: {path}")
+
+    files = path.rglob("*.all") if recursive else path.glob("*.all")
+    return sorted(set(files))
+
+
+# ---------------------------------------------------------------------------
+# Core datagram iterator.
+# ---------------------------------------------------------------------------
+
+
+def iter_datagrams(path: Path) -> Iterator[DatagramRecord]:
+    """Walk a .all file and yield each datagram as a raw ``DatagramRecord``.
+
+    The body bytes are the raw datagram contents between the envelope
+    header and the trailing footer, exclusive. Use the type-specific
+    parser functions (:func:`parse_position`, :func:`parse_depth`,
+    :func:`parse_seabed_image`) to decode the body.
+
+    Unrecognized datagram types are still yielded — callers can filter on
+    ``record.header.type_of_datagram`` and skip what they don't care about.
+    """
+    file_size = path.stat().st_size
+    with path.open("rb") as fid:
+        offset = 0
+        while offset < file_size:
+            fid.seek(offset)
+            header = _read_header(fid)
+            if header is None:
+                break
+
+            total_size = header.number_of_bytes + 4
+            if header.number_of_bytes < DGM_HEADER_SIZE - 4 or offset + total_size > file_size:
+                raise RuntimeError(
+                    f"Invalid datagram length {header.number_of_bytes} at byte offset {offset} in {path}"
+                )
+
+            body_size = total_size - DGM_HEADER_SIZE - DGM_FOOTER_SIZE
+            if body_size < 0:
+                raise RuntimeError(
+                    f"Negative body size at offset {offset} in {path}: total={total_size}"
+                )
+
+            body = fid.read(body_size)
+            if len(body) != body_size:
+                raise EOFError(
+                    f"Truncated datagram at offset {offset} in {path}: "
+                    f"expected {body_size} body bytes, got {len(body)}"
+                )
+
+            yield DatagramRecord(header=header, offset=offset, body=body)
+
+            offset += total_size
+
+
+# ---------------------------------------------------------------------------
+# Type-specific parsers.
+# ---------------------------------------------------------------------------
+
+
+def parse_position(record: DatagramRecord) -> PositionDatagram:
+    """Decode the body of a ``P`` position datagram."""
+    if record.header.type_of_datagram != "P":
+        raise ValueError(
+            f"parse_position expects type 'P', got {record.header.type_of_datagram!r}"
+        )
+
+    s = _unpack(P_BODY_FMT, record.body, 0)
+    (
+        counter,
+        serial_number,
+        latitude_raw,
+        longitude_raw,
+        quality_raw,
+        sog_raw,
+        cog_raw,
+        heading_raw,
+        descriptor,
+        nbytes_input,
+    ) = s
+
+    # The embedded position-system datagram follows the fixed body. The spec
+    # adds a spare alignment byte if the running byte count is odd.
+    input_dg = record.body[P_BODY_SIZE : P_BODY_SIZE + nbytes_input]
+
+    return PositionDatagram(
+        header=record.header,
+        counter=counter,
+        serial_number=serial_number,
+        latitude_deg=latitude_raw / 20_000_000.0,
+        longitude_deg=longitude_raw / 10_000_000.0,
+        position_fix_quality_m=quality_raw / 100.0,
+        speed_over_ground_m_s=sog_raw / 100.0,
+        course_over_ground_deg=cog_raw / 100.0,
+        heading_deg=heading_raw / 100.0,
+        descriptor=descriptor,
+        input_datagram=input_dg,
+    )
+
+
+def parse_depth(record: DatagramRecord) -> DepthDatagram:
+    """Decode the body of an ``X`` depth (XYZ) datagram."""
+    if record.header.type_of_datagram != "X":
+        raise ValueError(
+            f"parse_depth expects type 'X', got {record.header.type_of_datagram!r}"
+        )
+
+    s = _unpack(X_BODY_FMT, record.body, 0)
+    (
+        counter,
+        serial_number,
+        heading_raw,
+        sound_speed_raw,
+        transducer_depth_m,
+        n_beams,
+        n_valid_detections,
+        sample_freq_hz,
+        scanning_info,
+        _spare1,
+        _spare2,
+        _spare3,
+    ) = s
+
+    beams: List[XBeam] = []
+    cursor = X_BODY_SIZE
+    for _ in range(n_beams):
+        b = _unpack(X_BEAM_FMT, record.body, cursor)
+        (
+            depth,
+            across,
+            along,
+            detect_win,
+            quality,
+            angle_adj_raw,
+            det_info,
+            rt_clean,
+            refl_raw,
+        ) = b
+        beams.append(
+            XBeam(
+                depth_m=float(depth),
+                across_track_m=float(across),
+                along_track_m=float(along),
+                detection_window_length=int(detect_win),
+                quality_factor=int(quality),
+                beam_incidence_angle_adjustment_deg=angle_adj_raw / 10.0,
+                detection_information=int(det_info),
+                realtime_cleaning_information=int(rt_clean),
+                reflectivity_db=refl_raw / 10.0,
+            )
+        )
+        cursor += X_BEAM_SIZE
+
+    return DepthDatagram(
+        header=record.header,
+        counter=counter,
+        serial_number=serial_number,
+        heading_deg=heading_raw / 100.0,
+        sound_speed_at_transducer_m_s=sound_speed_raw / 10.0,
+        transducer_depth_m=float(transducer_depth_m),
+        num_beams=n_beams,
+        num_valid_detections=n_valid_detections,
+        sample_frequency_hz=float(sample_freq_hz),
+        scanning_info=int(scanning_info),
+        beams=beams,
+    )
+
+
+def parse_seabed_image(record: DatagramRecord) -> SeabedImageDatagram:
+    """Decode the body of a ``Y`` seabed image datagram.
+
+    The Y datagram is the primary source of per-beam backscatter amplitude
+    samples for older Kongsberg systems (pre-kmall). Sample values are int16
+    in units of 0.1 dB.
+    """
+    if record.header.type_of_datagram != "Y":
+        raise ValueError(
+            f"parse_seabed_image expects type 'Y', got {record.header.type_of_datagram!r}"
+        )
+
+    s = _unpack(Y_BODY_FMT, record.body, 0)
+    (
+        counter,
+        serial_number,
+        sample_freq,
+        range_to_normal,
+        normal_bs,
+        oblique_bs,
+        tx_beam_width_raw,
+        tvg_cross_raw,
+        num_beams,
+    ) = s
+
+    beams: List[YBeam] = []
+    cursor = Y_BODY_SIZE
+    for _ in range(num_beams):
+        b = _unpack(Y_BEAM_FMT, record.body, cursor)
+        sort_dir, det_info, n_samples, centre_sample = b
+        beams.append(
+            YBeam(
+                sorting_direction=int(sort_dir),
+                detection_info=int(det_info),
+                number_of_samples_per_beam=int(n_samples),
+                centre_sample_number=int(centre_sample),
+            )
+        )
+        cursor += Y_BEAM_SIZE
+
+    # All sample arrays are packed together after the per-beam headers.
+    total_samples = sum(b.number_of_samples_per_beam for b in beams)
+    if total_samples > 0:
+        sample_fmt = f"<{total_samples}h"
+        sample_size = struct.calcsize(sample_fmt)
+        all_samples = struct.unpack_from(sample_fmt, record.body, cursor)
+
+        # Hand each beam its slice.
+        idx = 0
+        for b in beams:
+            n = b.number_of_samples_per_beam
+            b.samples = tuple(all_samples[idx : idx + n])
+            idx += n
+
+    return SeabedImageDatagram(
+        header=record.header,
+        counter=counter,
+        serial_number=serial_number,
+        sample_frequency_hz=float(sample_freq),
+        range_to_normal_incidence_samples=int(range_to_normal),
+        normal_incidence_bs_db=int(normal_bs),
+        oblique_bs_db=int(oblique_bs),
+        tx_beam_width_deg=tx_beam_width_raw / 10.0,
+        tvg_crossover_deg=tvg_cross_raw / 10.0,
+        num_beams=num_beams,
+        beams=beams,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Convenience iterators.
+# ---------------------------------------------------------------------------
+
+
+def iter_position_datagrams(path: Path) -> Iterator[PositionDatagram]:
+    """Walk a .all file and yield each parsed ``P`` position datagram."""
+    for rec in iter_datagrams(path):
+        if rec.header.type_of_datagram == "P":
+            yield parse_position(rec)
+
+
+def iter_depth_datagrams(path: Path) -> Iterator[DepthDatagram]:
+    """Walk a .all file and yield each parsed ``X`` depth datagram."""
+    for rec in iter_datagrams(path):
+        if rec.header.type_of_datagram == "X":
+            yield parse_depth(rec)
+
+
+def iter_seabed_image_datagrams(path: Path) -> Iterator[SeabedImageDatagram]:
+    """Walk a .all file and yield each parsed ``Y`` seabed image datagram."""
+    for rec in iter_datagrams(path):
+        if rec.header.type_of_datagram == "Y":
+            yield parse_seabed_image(rec)
