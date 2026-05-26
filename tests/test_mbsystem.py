@@ -86,6 +86,17 @@ def test_mbgrid_rejects_unknown_grid_type(tmp_path):
         )
 
 
+def test_mbgrid_requires_format_for_single_file_input(tmp_path):
+    """Auto-wrapping a single data file in a datalist needs a format code."""
+    fake = tmp_path / "data.kmall"
+    fake.touch()
+    with pytest.raises(ValueError, match="format="):
+        mbsystem.mbgrid(
+            fake, output_root=tmp_path / "out", cell_size_m=100.0,
+            # format intentionally omitted
+        )
+
+
 # ---------------------------------------------------------------------------
 # Integration tests gated on MB-System binaries being installed.
 # ---------------------------------------------------------------------------

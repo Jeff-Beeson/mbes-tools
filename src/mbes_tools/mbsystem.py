@@ -19,9 +19,11 @@ Source: written from MB-System's CLI documentation
 
 from __future__ import annotations
 
+import math
 import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -95,12 +97,20 @@ class Bounds:
 
 
 def _run(cmd: Sequence[str], cwd: Optional[Path] = None) -> subprocess.CompletedProcess:
-    """Run an MB-System command, capture stdout/stderr. Does not raise."""
+    """Run an MB-System command, capture stdout/stderr. Does not raise.
+
+    MB-System tools occasionally emit non-UTF-8 bytes in their progress
+    output (filenames echoed verbatim from binary data, locale-encoded
+    fragments). We decode with ``errors="replace"`` so a stray byte
+    doesn't crash the wrapper — invalid bytes become Unicode replacement
+    characters in the captured stdout/stderr.
+    """
     return subprocess.run(
         list(cmd),
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
+        errors="replace",
         check=False,
     )
 
@@ -275,15 +285,28 @@ def mbgrid(
 ) -> MBGridResult:
     """Run mbgrid to produce a bathymetry grid.
 
+    mbgrid's ``-I`` flag requires a ``.mb-1`` datalist, never a single
+    data file. To make calls ergonomic, this wrapper auto-wraps a single
+    data file in a temporary datalist when ``input_path`` does not have
+    the ``.mb-1`` extension. A single-file call requires ``format=`` so
+    we know what to write in the temp datalist.
+
     Args:
-        input_path: Single data file or a ``.mb-1`` datalist.
+        input_path: A ``.mb-1`` datalist, OR a single data file (which we
+            auto-wrap in a temp datalist).
         output_root: Output prefix; mbgrid appends ``.grd`` (and produces
             companion ``.grd.cmd``, plot script, etc. in the same dir).
         cell_size_m: Grid cell size in meters (passed as ``-E m/m``).
-        bounds: Optional W/E/S/N bounding box; defaults to mbgrid's
-            auto-derived extent.
-        format: Optional MB-System format code (``-F``). Omit when using
-            a datalist (the datalist carries format per file).
+        bounds: Optional W/E/S/N bounding box. If omitted and ``input_path``
+            is a single data file, the wrapper auto-derives bounds by
+            running ``mbinfo`` first. For datalist inputs without bounds,
+            mbgrid must derive its own (which has been unreliable on some
+            MB-System versions — supply explicit bounds if you hit a
+            "Grid bounds not properly specified" error).
+        format: MB-System format code (e.g. ``MB_FORMAT_KMALL``).
+            Required when ``input_path`` is a single data file. Ignored
+            when ``input_path`` is already a datalist (the datalist
+            carries format per file).
         grid_type: Algorithm tag mapping to mbgrid's ``-A``:
 
             ====================  ====
@@ -304,6 +327,10 @@ def mbgrid(
         An :class:`MBGridResult` with the expected output ``.grd`` path,
         the process return code, and captured stdout / stderr. Inspect
         ``.succeeded`` for the quick yes/no.
+
+    Raises:
+        ValueError: If ``grid_type`` is unknown, or if a single data file
+            is passed without a ``format=``.
     """
     bin_path = _require_mb_tool("mbgrid")
     if grid_type not in _GRID_ALGORITHM:
@@ -311,24 +338,66 @@ def mbgrid(
             f"grid_type must be one of {sorted(_GRID_ALGORITHM)}; got {grid_type!r}"
         )
 
+    input_path = Path(input_path)
     output_root = Path(output_root)
     output_root.parent.mkdir(parents=True, exist_ok=True)
 
+    # Auto-wrap single data files in a temp datalist. mbgrid -I requires
+    # a datalist; passing a binary data file there causes the underlying
+    # mbgrid to try to parse it as text, which historically has manifested
+    # as a glibc buffer overflow during mb_read_init.
+    tmp_datalist_dir: Optional[Path] = None
+    is_single_file = input_path.suffix.lower() != ".mb-1"
+    if not is_single_file:
+        datalist_path = input_path
+    else:
+        if format is None:
+            raise ValueError(
+                "format= is required when input_path is a single data file "
+                "(needed to write the temp datalist). Pass MB_FORMAT_KMALL, "
+                "MB_FORMAT_ALL, etc., or build a .mb-1 datalist with "
+                "make_datalist() and pass that instead."
+            )
+        tmp_datalist_dir = Path(tempfile.mkdtemp(prefix="mbes_tools_mbgrid_"))
+        datalist_path = tmp_datalist_dir / "auto.mb-1"
+        make_datalist([input_path], datalist_path, format=format, overwrite=True)
+
+    # Auto-derive bounds via mbinfo when caller didn't supply them, but
+    # only for single-file inputs (datalist auto-bounds would need to
+    # mbinfo each entry and union — a v0.1 feature).
+    if bounds is None and is_single_file:
+        info = mbinfo(input_path, format=format)
+        if all(
+            math.isfinite(v)
+            for v in (info.longitude_min, info.longitude_max,
+                      info.latitude_min, info.latitude_max)
+        ):
+            bounds = Bounds(
+                west=info.longitude_min,
+                east=info.longitude_max,
+                south=info.latitude_min,
+                north=info.latitude_max,
+            )
+
     cmd = [
         bin_path,
-        "-I", str(input_path),
+        "-I", str(datalist_path),
         "-O", str(output_root),
-        "-E", f"{cell_size_m}/{cell_size_m}",
+        # mbgrid -E default unit is degrees; pass the "m" suffix so
+        # cell_size_m is interpreted as meters.
+        "-E", f"{cell_size_m}/{cell_size_m}/m",
         "-A", str(_GRID_ALGORITHM[grid_type]),
     ]
     if bounds is not None:
         cmd += ["-R", f"{bounds.west}/{bounds.east}/{bounds.south}/{bounds.north}"]
-    if format is not None:
-        cmd += ["-F", str(format)]
     if extra_args:
         cmd += list(extra_args)
 
-    result = _run(cmd)
+    try:
+        result = _run(cmd)
+    finally:
+        if tmp_datalist_dir is not None:
+            shutil.rmtree(tmp_datalist_dir, ignore_errors=True)
 
     return MBGridResult(
         output_path=Path(f"{output_root}.grd"),
