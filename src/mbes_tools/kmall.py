@@ -86,6 +86,10 @@ class MRZSounding:
     x_m: float
     y_m: float
     z_m: float
+    # Seabed-image (sidescan) sample bookkeeping for this beam. These are needed
+    # to locate and patch the trailing SIsample_desidB array (see MRZDatagram).
+    si_start_range_samples: int = 0
+    si_num_samples: int = 0
 
     @property
     def is_valid(self) -> bool:
@@ -124,6 +128,17 @@ class MRZDatagram:
 
     # Soundings
     soundings: List[MRZSounding] = field(default_factory=list)
+
+    # Location of this datagram within its source file, useful for in-place
+    # binary patching (e.g. backscatter correction). Set by the parser.
+    byte_offset: Optional[int] = None
+    num_bytes_dgm: Optional[int] = None
+
+    # Trailing seabed-image (sidescan) amplitude samples, in 0.1 dB (signed
+    # int16), concatenated across all beams in sounding order. Only populated
+    # when the datagram is parsed with ``parse_seabed_image=True``; otherwise
+    # ``None``. The per-beam sample counts are ``MRZSounding.si_num_samples``.
+    si_sample_desidb: Optional[List[int]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +209,7 @@ def parse_mrz_datagram(
     datagram_start: int,
     datagram_size: int,
     normalize_manual_depth_modes: bool = True,
+    parse_seabed_image: bool = False,
 ) -> Optional[MRZDatagram]:
     """Parse one #MRZ datagram and return an ``MRZDatagram``.
 
@@ -208,6 +224,10 @@ def parse_mrz_datagram(
             the leading uint32 of the datagram header.
         normalize_manual_depth_modes: If True, subtract 100 from manual
             depth modes (raw 106 becomes 6).
+        parse_seabed_image: If True, also read the trailing seabed-image
+            sample array into ``MRZDatagram.si_sample_desidb``. Off by
+            default because most callers (e.g. table generation) do not need
+            it and skipping it is faster.
 
     Returns:
         An ``MRZDatagram`` if the datagram type is ``#MRZ``, else ``None``.
@@ -330,6 +350,8 @@ def parse_mrz_datagram(
         z_re_ref_point_m = float(s[32])
         y_re_ref_point_m = float(s[33])
         x_re_ref_point_m = float(s[34])
+        si_start_range_samples = int(s[37])
+        si_num_samples = int(s[39])
 
         # Move to the declared end of the sounding record in case future versions
         # add bytes after the currently parsed structure.
@@ -348,8 +370,22 @@ def parse_mrz_datagram(
                 x_m=x_re_ref_point_m,
                 y_m=y_re_ref_point_m,
                 z_m=z_re_ref_point_m,
+                si_start_range_samples=si_start_range_samples,
+                si_num_samples=si_num_samples,
             )
         )
+
+    # The seabed-image sample block immediately follows the sounding array.
+    # Read it only when requested; the file pointer is currently positioned at
+    # its start (the sounding loop advanced past the last sounding record).
+    si_sample_desidb: Optional[List[int]] = None
+    if parse_seabed_image:
+        total_si_samples = sum(snd.si_num_samples for snd in soundings)
+        if total_si_samples > 0:
+            si_fmt = f"<{total_si_samples}h"
+            si_sample_desidb = list(unpack_from_file(fid, si_fmt))
+        else:
+            si_sample_desidb = []
 
     # Ensure we land exactly at the end of the datagram, including any
     # trailing seabed image bytes we did not parse.
@@ -372,17 +408,24 @@ def parse_mrz_datagram(
         latitude_deg=latitude_deg,
         longitude_deg=longitude_deg,
         soundings=soundings,
+        byte_offset=datagram_start,
+        num_bytes_dgm=datagram_size,
+        si_sample_desidb=si_sample_desidb,
     )
 
 
 def iter_mrz_datagrams(
     path: Path,
     normalize_manual_depth_modes: bool = True,
+    parse_seabed_image: bool = False,
 ) -> Iterator[MRZDatagram]:
     """Walk a .kmall file and yield each #MRZ datagram.
 
     Non-#MRZ datagrams (e.g. #FCF, #SPE, #SKM, #SPO) are skipped by their
     declared byte length and not parsed.
+
+    Set ``parse_seabed_image=True`` to also populate each datagram's
+    ``si_sample_desidb`` array (needed for backscatter patching).
     """
     file_size = path.stat().st_size
     with path.open("rb") as fid:
@@ -406,6 +449,7 @@ def iter_mrz_datagrams(
                     datagram_start=offset,
                     datagram_size=datagram_size,
                     normalize_manual_depth_modes=normalize_manual_depth_modes,
+                    parse_seabed_image=parse_seabed_image,
                 )
                 if dgm is not None:
                     yield dgm

@@ -4,15 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mbes-tools"
-version = "0.0.1"
-description = "Python tools for Kongsberg multibeam I/O and MB-System integration"
+version = "0.1.0"
+description = "Python tools for Kongsberg multibeam I/O, backscatter normalization, and MB-System integration"
 readme = "README.md"
 requires-python = ">=3.12"
 license = {text = "MIT"}
 authors = [
     {name = "Jeff Beeson"}
 ]
-keywords = ["multibeam", "kongsberg", "kmall", "mb-system", "oceanography", "hydrography"]
+keywords = ["multibeam", "kongsberg", "kmall", "backscatter", "mb-system", "oceanography", "hydrography"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Science/Research",
@@ -26,9 +26,26 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Sector/angle table generation and applying corrections to KMALL.
+backscatter = [
+    "scipy",
+    "pyproj",
+    "pandas",
+    "python-dotenv",
+]
+# Interactive Lambertian balancer GUI (mbes-bs-gui).
+gui = [
+    "pandas",
+    "matplotlib",
+]
 dev = [
     "pytest",
 ]
+
+[project.scripts]
+mbes-bs-table = "mbes_tools.backscatter.cli:table_main"
+mbes-bs-apply = "mbes_tools.backscatter.cli:apply_main"
+mbes-bs-gui = "mbes_tools.backscatter.cli:gui_main"
 
 [project.urls]
 Repository = "https://github.com/Jeff-Beeson/mbes-tools"
