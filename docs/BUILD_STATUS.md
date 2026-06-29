@@ -2,9 +2,8 @@
 
 **Snapshot:** 2026-06-29. This is the handoff/status doc for the
 `docs/UPGRADE_PLAN.md` work. Capabilities **A, B, C** of the plan are
-implemented and verified against real data; **D** is the backlog described
-below. The capability work lives in a **stack of open PRs** (not yet merged to
-`main`) — see the map below.
+implemented, verified against real data, and **merged to `main`** (v0.6.0);
+**D** is the backlog described below.
 
 > Read this together with `docs/UPGRADE_PLAN.md` (the spec),
 > `docs/VERIFICATION_DATA.md` (the real-data corpus + how to regenerate the
@@ -12,28 +11,34 @@ below. The capability work lives in a **stack of open PRs** (not yet merged to
 
 ---
 
-## 1. PR stack (open, unmerged)
+## 1. What merged (all on `main`)
 
-Each capability is its own branch + PR; PRs are **stacked** (each based on the
-previous) so the diffs stay focused. Merge **in order**, oldest first; GitHub
-auto-retargets the next PR to `main` as each lands.
+The work landed as a stack of per-capability PRs (merged in order with merge
+commits; all feature branches deleted). For history, `git log --oneline --merges`.
 
-| PR | Branch | Base | Contents |
-|----|--------|------|----------|
-| #1 | `catalog/verification-data` | `main` | §2 verification catalog: `mbes_tools.catalog`, manifest, `docs/` |
-| #2 | `capability-a/all-backscatter-parity` | #1 | `.all` backscatter parity (N/R parsers, `process_all_ping`, `.all` apply, CLI dispatch) |
-| #3 | `capability-b/bs-source-beam-stat` | #2 | configurable bs-source + `beam_stat` reducer (Source B), multi-stat |
-| #4 | `capability-c/robustness-crs-models` | #3 | projection/auto-UTM, tolerant readers, depth-mode consolidation |
-| #5 | `docs/build-status` | `main` | this document (independent; can merge any time) |
+| PR | Capability | Contents |
+|----|-----------|----------|
+| #1 | catalog (§2) | `mbes_tools.catalog`, manifest, `docs/` |
+| #7 | A | `.all` backscatter parity (N/R parsers, `process_all_ping`, `.all` apply, CLI dispatch) — re-opened from the auto-closed #2 |
+| #3 | B | configurable bs-source + `beam_stat` reducer (Source B), multi-stat |
+| #4 | C | projection/auto-UTM, tolerant readers, depth-mode consolidation |
+| #6 | diagnostics | `mbes_tools.diagnostics` visual review suite (`mbes-diagnostics`) |
+| #5 | docs | this document |
+
+> Note for future stacked-PR merges: deleting a PR's *base* branch auto-**closes**
+> the child PR (GitHub does not retarget on base-deletion). Retarget children to
+> `main` first (`gh api -X PATCH repos/<owner>/<repo>/pulls/<n> -f base=main` —
+> `gh pr edit --base` was blocked here by a Projects-classic GraphQL error), then
+> merge. Use merge commits, not squash, so the chain stays consistent.
 
 **Resume a session:**
 ```bash
 cd ~/code/mbes-tools
-git checkout capability-c/robustness-crs-models   # current tip of the stack
-python -m pytest -q                                # expect 125 passed, 1 skipped
+git checkout main && git pull
+python -m pytest -q                                # expect 131 passed, 2 skipped
 ```
-Start the next capability by branching off the current tip (or off `main` once
-the stack is merged). Keep one capability per branch/PR; keep `pytest -q` green;
+Start the next capability by branching off `main`. Keep one capability per
+branch/PR; keep `pytest -q` green;
 bump the version (`pyproject.toml` **and** `src/mbes_tools/__init__.py`) and add
 a `CHANGELOG.md` entry per capability.
 
