@@ -45,6 +45,8 @@ from typing import Iterator, List, Optional, Tuple
 DGM_TYPE_POSITION = b"P"
 DGM_TYPE_DEPTH = b"X"
 DGM_TYPE_SEABED_IMAGE = b"Y"
+DGM_TYPE_RAW_RANGE_ANGLE = b"N"  # datagram 78: raw range and angle
+DGM_TYPE_RUNTIME = b"R"          # datagram 82: runtime parameters
 
 # Constants from the Kongsberg envelope.
 STX = 0x02
@@ -96,6 +98,40 @@ Y_BODY_SIZE = struct.calcsize(Y_BODY_FMT)
 # centreSampleNumber (u16).
 Y_BEAM_FMT = "<bBHH"
 Y_BEAM_SIZE = struct.calcsize(Y_BEAM_FMT)
+
+# N raw range and angle datagram (78). Body after the envelope header, before
+# the per-sector / per-beam loops:
+# pingCounter, serialNumber, soundSpeed*10 (0.1 m/s), numTxSectors, numRxBeams,
+# numValidDetections, sampleFrequency (f32), Dscale (u32).
+N_BODY_FMT = "<HHHHHHfL"
+N_BODY_SIZE = struct.calcsize(N_BODY_FMT)
+
+# N per-transmit-sector record (parsed only to advance past it):
+# tiltAngle*100 (i16), focusRange (u16), signalLength (f32), sectorTransmitDelay (f32),
+# centreFrequency (f32), meanAbsorption (u16), signalWaveformId (u8),
+# transmitSectorNumber (u8), signalBandwidth (f32).
+N_TX_FMT = "<hHfffHBBf"
+N_TX_SIZE = struct.calcsize(N_TX_FMT)
+
+# N per-receive-beam record:
+# beamPointingAngle*100 (i16), transmitSectorNumber (u8), detectionInfo (u8),
+# detectionWindowLength (u16), qualityFactor (u8), Dcorr (i8),
+# twoWayTravelTime (f32), reflectivity*10 (i16), realtimeCleaningInfo (i8), spare (u8).
+N_RX_FMT = "<hBBHBbfhbB"
+N_RX_SIZE = struct.calcsize(N_RX_FMT)
+
+# R runtime parameters datagram (82). Body after the envelope header, before the
+# 3-byte footer. Only a few fields are decoded by name; the rest are kept to
+# advance the cursor and round-trip the record.
+# pingCounter, serialNumber, operatorStationStatus, processingUnitStatus,
+# bspStatus, sonarHeadStatus, mode, filterIdentifier, minDepth (u16), maxDepth (u16),
+# absorptionCoeff*100 (u16), txPulseLength (u16), txBeamWidth*10 (u16),
+# txPower (i8), rxBeamWidth*10 (u8), rxBandwidth*50Hz (u8), mode2 (u8), tvg (u8),
+# sourceOfSoundSpeed (u8), maxPortSwathWidth (u16), beamSpacing (u8),
+# maxPortCoverageDeg (u8), yawPitchStabMode (u8), maxStbdCoverageDeg (u8),
+# maxStbdSwathWidth (u16), txAlongTilt*10 (i16), filterIdentifier2 (u8).
+R_BODY_FMT = "<HHBBBBBBHHHHHbBBBBBHBBBBHhB"
+R_BODY_SIZE = struct.calcsize(R_BODY_FMT)
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +200,21 @@ class XBeam:
     realtime_cleaning_information: int
     reflectivity_db: float
 
+    @property
+    def is_valid(self) -> bool:
+        """True for beams with a real bottom detection.
+
+        In the XYZ88 datagram, bit 7 of ``detectionInfo`` flags a beam with no
+        valid detection (set = invalid). Real-time cleaning flags the beam by
+        making ``realtimeCleaningInformation`` negative. A zero depth is also
+        treated as no detection.
+        """
+        return (
+            (self.detection_information & 0x80) == 0
+            and self.realtime_cleaning_information >= 0
+            and self.depth_m != 0.0
+        )
+
 
 @dataclass
 class DepthDatagram:
@@ -211,6 +262,73 @@ class SeabedImageDatagram:
     tvg_crossover_deg: float
     num_beams: int
     beams: List[YBeam] = field(default_factory=list)
+
+
+@dataclass
+class RawRangeAngleBeam:
+    """One receive beam in an ``N`` raw range and angle (78) datagram.
+
+    ``beam_pointing_angle_deg`` is the beam angle re the RX array — the same
+    quantity as the .kmall ``beam_angle_re_rx_deg``. ``tx_sector_number`` is the
+    zero-based transmit sector, used to key sector backscatter corrections.
+    """
+
+    beam_pointing_angle_deg: float
+    tx_sector_number: int
+    detection_info: int
+    detection_window_length: int
+    quality_factor: int
+    d_corr: int
+    two_way_travel_time_s: float
+    reflectivity_db: float
+    realtime_cleaning_information: int
+
+    @property
+    def is_valid(self) -> bool:
+        """True for beams with a real detection (bit 7 of detectionInfo clear)."""
+        return (self.detection_info & 0x80) == 0 and self.realtime_cleaning_information >= 0
+
+
+@dataclass
+class RawRangeAngleDatagram:
+    """Parsed ``N`` raw range and angle (78) datagram.
+
+    Carries the per-beam pointing angle and transmit-sector number that the XYZ
+    (``X``) datagram does not, so the two are joined by ping counter for
+    backscatter analysis (angle/sector from ``N``, depth/reflectivity from ``X``).
+    """
+
+    header: DatagramHeader
+    ping_counter: int
+    serial_number: int
+    sound_speed_m_s: float
+    num_tx_sectors: int
+    num_rx_beams: int
+    num_valid_detections: int
+    sample_frequency_hz: float
+    beams: List[RawRangeAngleBeam] = field(default_factory=list)
+
+
+@dataclass
+class RuntimeDatagram:
+    """Parsed ``R`` runtime parameters (82) datagram.
+
+    The ``mode`` byte encodes the depth/ping mode; its meaning is model-specific
+    (for EM2040/EM2045 the low bits select frequency rather than depth). Decode
+    it with :mod:`mbes_tools.depth_modes`. Runtime datagrams are emitted only
+    when settings change, so a reader tracks the most recent one as ping state.
+    """
+
+    header: DatagramHeader
+    ping_counter: int
+    serial_number: int
+    mode: int
+    filter_identifier: int
+    minimum_depth_m: int
+    maximum_depth_m: int
+    absorption_coefficient_db_km: float
+    transmit_pulse_length_us: int
+    yaw_pitch_stabilization_mode: int
 
 
 # ---------------------------------------------------------------------------
@@ -273,7 +391,9 @@ def iter_all_files(path: Path, recursive: bool = False) -> List[Path]:
 # ---------------------------------------------------------------------------
 
 
-def iter_datagrams(path: Path) -> Iterator[DatagramRecord]:
+def iter_datagrams(
+    path: Path, types: Optional[set] = None
+) -> Iterator[DatagramRecord]:
     """Walk a .all file and yield each datagram as a raw ``DatagramRecord``.
 
     The body bytes are the raw datagram contents between the envelope
@@ -283,6 +403,13 @@ def iter_datagrams(path: Path) -> Iterator[DatagramRecord]:
 
     Unrecognized datagram types are still yielded — callers can filter on
     ``record.header.type_of_datagram`` and skip what they don't care about.
+
+    Args:
+        types: Optional set of single-character datagram type codes
+            (e.g. ``{"X", "N", "R", "P"}``). When given, only those datagrams
+            are read and yielded; the bodies of all others are seeked past
+            without reading, which avoids paying to read large bodies
+            (e.g. ``Y`` seabed image) the caller does not need.
     """
     file_size = path.stat().st_size
     with path.open("rb") as fid:
@@ -304,6 +431,10 @@ def iter_datagrams(path: Path) -> Iterator[DatagramRecord]:
                 raise RuntimeError(
                     f"Negative body size at offset {offset} in {path}: total={total_size}"
                 )
+
+            if types is not None and header.type_of_datagram not in types:
+                offset += total_size
+                continue
 
             body = fid.read(body_size)
             if len(body) != body_size:
@@ -499,6 +630,98 @@ def parse_seabed_image(record: DatagramRecord) -> SeabedImageDatagram:
     )
 
 
+def parse_raw_range_angle(record: DatagramRecord) -> RawRangeAngleDatagram:
+    """Decode the body of an ``N`` raw range and angle (78) datagram.
+
+    The N datagram supplies per-beam pointing angle and transmit-sector number.
+    The transmit-sector blocks between the fixed header and the receive-beam
+    array are skipped (their contents are not needed for backscatter binning).
+    """
+    if record.header.type_of_datagram != "N":
+        raise ValueError(
+            f"parse_raw_range_angle expects type 'N', got {record.header.type_of_datagram!r}"
+        )
+
+    s = _unpack(N_BODY_FMT, record.body, 0)
+    (
+        ping_counter,
+        serial_number,
+        sound_speed_raw,
+        num_tx_sectors,
+        num_rx_beams,
+        num_valid_detections,
+        sample_freq_hz,
+        _dscale,
+    ) = s
+
+    # Skip the transmit-sector records; advance to the receive-beam array.
+    cursor = N_BODY_SIZE + num_tx_sectors * N_TX_SIZE
+
+    beams: List[RawRangeAngleBeam] = []
+    for _ in range(num_rx_beams):
+        b = _unpack(N_RX_FMT, record.body, cursor)
+        (
+            angle_raw,
+            tx_sector,
+            det_info,
+            det_win,
+            quality,
+            d_corr,
+            twtt,
+            refl_raw,
+            rt_clean,
+            _spare,
+        ) = b
+        beams.append(
+            RawRangeAngleBeam(
+                beam_pointing_angle_deg=angle_raw / 100.0,
+                tx_sector_number=int(tx_sector),
+                detection_info=int(det_info),
+                detection_window_length=int(det_win),
+                quality_factor=int(quality),
+                d_corr=int(d_corr),
+                two_way_travel_time_s=float(twtt),
+                reflectivity_db=refl_raw / 10.0,
+                realtime_cleaning_information=int(rt_clean),
+            )
+        )
+        cursor += N_RX_SIZE
+
+    return RawRangeAngleDatagram(
+        header=record.header,
+        ping_counter=int(ping_counter),
+        serial_number=int(serial_number),
+        sound_speed_m_s=sound_speed_raw / 10.0,
+        num_tx_sectors=int(num_tx_sectors),
+        num_rx_beams=int(num_rx_beams),
+        num_valid_detections=int(num_valid_detections),
+        sample_frequency_hz=float(sample_freq_hz),
+        beams=beams,
+    )
+
+
+def parse_runtime(record: DatagramRecord) -> RuntimeDatagram:
+    """Decode the body of an ``R`` runtime parameters (82) datagram."""
+    if record.header.type_of_datagram != "R":
+        raise ValueError(
+            f"parse_runtime expects type 'R', got {record.header.type_of_datagram!r}"
+        )
+
+    s = _unpack(R_BODY_FMT, record.body, 0)
+    return RuntimeDatagram(
+        header=record.header,
+        ping_counter=int(s[0]),
+        serial_number=int(s[1]),
+        mode=int(s[6]),
+        filter_identifier=int(s[7]),
+        minimum_depth_m=int(s[8]),
+        maximum_depth_m=int(s[9]),
+        absorption_coefficient_db_km=s[10] / 100.0,
+        transmit_pulse_length_us=int(s[11]),
+        yaw_pitch_stabilization_mode=int(s[23]),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Convenience iterators.
 # ---------------------------------------------------------------------------
@@ -523,3 +746,17 @@ def iter_seabed_image_datagrams(path: Path) -> Iterator[SeabedImageDatagram]:
     for rec in iter_datagrams(path):
         if rec.header.type_of_datagram == "Y":
             yield parse_seabed_image(rec)
+
+
+def iter_raw_range_angle_datagrams(path: Path) -> Iterator[RawRangeAngleDatagram]:
+    """Walk a .all file and yield each parsed ``N`` raw range and angle datagram."""
+    for rec in iter_datagrams(path):
+        if rec.header.type_of_datagram == "N":
+            yield parse_raw_range_angle(rec)
+
+
+def iter_runtime_datagrams(path: Path) -> Iterator[RuntimeDatagram]:
+    """Walk a .all file and yield each parsed ``R`` runtime parameters datagram."""
+    for rec in iter_datagrams(path):
+        if rec.header.type_of_datagram == "R":
+            yield parse_runtime(rec)

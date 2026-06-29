@@ -1,3 +1,3 @@
 """mbes-tools: Python tools for Kongsberg multibeam I/O, backscatter normalization, and MB-System integration."""
 
-__version__ = "0.1.0"
+__version__ = "0.3.0"
