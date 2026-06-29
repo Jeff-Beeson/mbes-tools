@@ -95,6 +95,28 @@ def all_mode_label(em_model: int, mode_byte: int) -> str:
     return all_runtime_mode_info(em_model, mode_byte)[1]
 
 
+def kmall_depth_mode_label(mode_id: int) -> str:
+    """Label for a normalized .kmall depthMode id (manual +100 offset removed)."""
+    return KMALL_DEPTH_MODE_LABELS.get(int(mode_id), f"mode{int(mode_id)}")
+
+
+def kmall_raw_to_calib(raw_depth_mode: int) -> int:
+    """Map a raw .kmall ``depthMode`` to the calibration-file mode number.
+
+    Manual modes are encoded as raw 100-108 (e.g. 101 = manual Shallow); auto
+    modes are the compact 0-8 ids. Both map onto the calib numbering used by
+    :mod:`mbes_tools.backscatter.apply` (Shallow = 2, Medium = 3, ...)::
+
+        101 -> 2 Shallow   104 -> 5 Deeper      107 -> 8 Extra Deep
+        102 -> 3 Medium    105 -> 6 Very Deep
+        103 -> 4 Deep      106 -> 7 Extra Deep
+    """
+    raw = int(raw_depth_mode)
+    if 100 <= raw <= 108:
+        return raw - 99
+    return raw + 1
+
+
 def mode_id_to_calib(mode_id: int) -> int:
     """Map a canonical/auto depth-mode id to the calibration-file mode number.
 

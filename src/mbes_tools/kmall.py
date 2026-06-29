@@ -29,6 +29,7 @@ Typical usage::
 
 from __future__ import annotations
 
+import re
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -418,10 +419,46 @@ def parse_mrz_datagram(
     )
 
 
+_RESYNC_SCAN_LIMIT = 8 * 1024 * 1024  # bound the forward scan when resyncing
+
+# kmall datagram type magics all start with '#' followed by three uppercase
+# letters; used to validate a candidate datagram start during resync.
+_KMALL_TYPE_RE = re.compile(rb"#[A-Z]{3}")
+
+
+def _resync_kmall(fid, file_size: int, from_offset: int) -> Optional[int]:
+    """Scan forward for the next plausible #XXX datagram start; None if none.
+
+    A kmall datagram is ``uint32 size`` + ``4-byte '#XXX' type``, so a candidate
+    header starts 4 bytes before each ``#XXX`` whose declared size fits the file.
+    The scan is bounded by ``_RESYNC_SCAN_LIMIT``.
+    """
+    start = from_offset + 1
+    end = min(file_size, start + _RESYNC_SCAN_LIMIT)
+    if start >= file_size:
+        return None
+    fid.seek(start)
+    window = fid.read(end - start)
+    search = 0
+    while True:
+        m = _KMALL_TYPE_RE.search(window, search)
+        if m is None:
+            return None
+        candidate = start + m.start() - 4
+        if candidate >= start and candidate + 8 <= file_size:
+            fid.seek(candidate)
+            size = struct.unpack("<I", fid.read(4))[0]
+            if 8 <= size and candidate + size <= file_size:
+                return candidate
+        search = m.start() + 1
+
+
 def iter_mrz_datagrams(
     path: Path,
     normalize_manual_depth_modes: bool = True,
     parse_seabed_image: bool = False,
+    on_error: str = "raise",
+    error_log: Optional[list] = None,
 ) -> Iterator[MRZDatagram]:
     """Walk a .kmall file and yield each #MRZ datagram.
 
@@ -430,6 +467,11 @@ def iter_mrz_datagrams(
 
     Set ``parse_seabed_image=True`` to also populate each datagram's
     ``si_sample_desidb`` array (needed for backscatter patching).
+
+    ``on_error="skip"`` resynchronizes to the next plausible datagram on a
+    corrupt length or parse failure instead of raising, appending
+    ``(offset, message)`` to ``error_log`` if provided — so one bad region never
+    aborts a survey. Default ``"raise"`` preserves strict behavior.
     """
     file_size = path.stat().st_size
     with path.open("rb") as fid:
@@ -442,20 +484,35 @@ def iter_mrz_datagrams(
 
             datagram_size, datagram_type = struct.unpack("<I4s", header8)
 
-            if datagram_size < 8:
-                raise RuntimeError(
-                    f"Invalid datagram length {datagram_size} at byte offset {offset} in {path}"
-                )
+            problem: Optional[str] = None
+            if datagram_size < 8 or offset + datagram_size > file_size:
+                problem = f"invalid datagram length {datagram_size}"
 
-            if datagram_type == b"#MRZ":
-                dgm = parse_mrz_datagram(
-                    fid,
-                    datagram_start=offset,
-                    datagram_size=datagram_size,
-                    normalize_manual_depth_modes=normalize_manual_depth_modes,
-                    parse_seabed_image=parse_seabed_image,
-                )
+            if problem is None and datagram_type == b"#MRZ":
+                try:
+                    dgm = parse_mrz_datagram(
+                        fid,
+                        datagram_start=offset,
+                        datagram_size=datagram_size,
+                        normalize_manual_depth_modes=normalize_manual_depth_modes,
+                        parse_seabed_image=parse_seabed_image,
+                    )
+                except (struct.error, EOFError, ValueError) as exc:
+                    problem = f"#MRZ parse failed: {type(exc).__name__}: {exc}"
+                    dgm = None
                 if dgm is not None:
                     yield dgm
+
+            if problem is not None:
+                msg = f"{problem} at byte offset {offset} in {path}"
+                if on_error != "skip":
+                    raise RuntimeError(msg)
+                if error_log is not None:
+                    error_log.append((offset, msg))
+                nxt = _resync_kmall(fid, file_size, offset)
+                if nxt is None or nxt <= offset:
+                    break
+                offset = nxt
+                continue
 
             offset += datagram_size

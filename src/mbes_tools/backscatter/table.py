@@ -536,6 +536,8 @@ def accumulate_file(
     si_window: Optional[int] = None,
     extra_agg: Optional[Dict[str, Dict[Tuple[int, int, int, float], Agg]]] = None,
     extra_stats: Optional[List[str]] = None,
+    on_error: str = "raise",
+    error_log: Optional[list] = None,
 ) -> Tuple[int, int, int, int]:
     """Accumulate one .kmall file into the aggregation dictionaries.
 
@@ -551,6 +553,8 @@ def accumulate_file(
         kmall_file,
         normalize_manual_depth_modes=normalize_manual_depth_modes,
         parse_seabed_image=(bs_source == "seabed_image"),
+        on_error=on_error,
+        error_log=error_log,
     ):
         mrz_count += 1
 
@@ -841,6 +845,16 @@ def main() -> None:
         help=(
             "Input format. 'auto' (default) detects .kmall vs .all from the "
             "input path / directory contents."
+        ),
+    )
+    parser.add_argument(
+        "--on-error",
+        choices=["skip", "raise"],
+        default="skip",
+        help=(
+            "How to handle a corrupt/truncated datagram or unreadable file. "
+            "'skip' (default) resynchronizes past it and continues so one bad "
+            "region never aborts a survey; 'raise' stops at the first problem."
         ),
     )
     parser.add_argument(
@@ -1150,6 +1164,8 @@ def main() -> None:
     total_soundings_after_geometry = 0
     total_soundings_used = 0
     total_ping_filter_stats: Dict[str, int] = defaultdict(int)
+    total_skipped_datagrams = 0
+    failed_files = 0
 
     print(f"Found {len(files)} {fmt} file(s).")
     if use_seabed_image:
@@ -1195,92 +1211,76 @@ def main() -> None:
         )
 
     record_label = "MRZ" if fmt == "kmall" else "pings"
+    accumulate_all_file = None
     if fmt == "all":
         from mbes_tools.backscatter.all_table import accumulate_all_file
 
+    def accumulate_one(input_file, file_ping_filter_stats, file_error_log):
+        common = dict(
+            agg=agg,
+            raw_depth_modes=raw_depth_modes,
+            pre_geometry_counts=pre_geometry_counts,
+            pre_flat_counts=pre_flat_counts,
+            angle_bin_size=args.angle_bin_deg,
+            valid_only=not args.include_invalid_detections,
+            min_depth=args.min_depth,
+            max_depth=args.max_depth,
+            geometry_filter=geometry_filter,
+            spatial_projector=spatial_projector,
+            slope_sampler=slope_sampler,
+            bathy_sd_sampler=bathy_sd_sampler,
+            slope_max_deg=args.slope_max_deg,
+            bathy_sd_max_m=args.bathy_sd_max_m,
+            min_ping_valid_fraction=args.min_ping_valid_fraction,
+            min_ping_valid_soundings=args.min_ping_valid_soundings,
+            min_ping_median_intensity_db=args.min_ping_median_intensity_db,
+            max_ping_intensity_std_db=args.max_ping_intensity_std_db,
+            max_port_starboard_diff_db=args.max_port_starboard_diff_db,
+            min_port_starboard_soundings=args.min_port_starboard_soundings,
+            min_ping_angle_coverage_deg=args.min_ping_angle_coverage_deg,
+            ping_filter_stats=file_ping_filter_stats,
+            flat_filter=args.flat_filter,
+            flat_radius_m=args.flat_radius_m,
+            flat_min_neighbors=args.flat_min_neighbors,
+            flat_max_slope_deg=args.flat_max_slope_deg,
+            flat_max_roughness_m=args.flat_max_roughness_m,
+            flat_max_bs_std_db=args.flat_max_bs_std_db,
+            bs_source=args.bs_source,
+            beam_stats=beam_stats,
+            si_window=args.si_window,
+            extra_agg=extra_agg,
+            extra_stats=extra_stats,
+            on_error=args.on_error,
+            error_log=file_error_log,
+        )
+        if fmt == "kmall":
+            return accumulate_file(
+                kmall_file=input_file,
+                reflectivity_field=args.reflectivity_field,
+                normalize_manual_depth_modes=not args.keep_manual_depth_mode_offset,
+                **common,
+            )
+        return accumulate_all_file(
+            input_file,
+            reflectivity_source=args.reflectivity_source,
+            **common,
+        )
+
     for input_file in files:
         file_ping_filter_stats: Dict[str, int] = defaultdict(int)
-        if fmt == "kmall":
+        file_error_log: list = []
+        try:
             record_count, sounding_before_geometry, sounding_after_geometry, sounding_used = (
-                accumulate_file(
-                    kmall_file=input_file,
-                    agg=agg,
-                    raw_depth_modes=raw_depth_modes,
-                    pre_geometry_counts=pre_geometry_counts,
-                    pre_flat_counts=pre_flat_counts,
-                    reflectivity_field=args.reflectivity_field,
-                    angle_bin_size=args.angle_bin_deg,
-                    normalize_manual_depth_modes=not args.keep_manual_depth_mode_offset,
-                    valid_only=not args.include_invalid_detections,
-                    min_depth=args.min_depth,
-                    max_depth=args.max_depth,
-                    geometry_filter=geometry_filter,
-                    spatial_projector=spatial_projector,
-                    slope_sampler=slope_sampler,
-                    bathy_sd_sampler=bathy_sd_sampler,
-                    slope_max_deg=args.slope_max_deg,
-                    bathy_sd_max_m=args.bathy_sd_max_m,
-                    min_ping_valid_fraction=args.min_ping_valid_fraction,
-                    min_ping_valid_soundings=args.min_ping_valid_soundings,
-                    min_ping_median_intensity_db=args.min_ping_median_intensity_db,
-                    max_ping_intensity_std_db=args.max_ping_intensity_std_db,
-                    max_port_starboard_diff_db=args.max_port_starboard_diff_db,
-                    min_port_starboard_soundings=args.min_port_starboard_soundings,
-                    min_ping_angle_coverage_deg=args.min_ping_angle_coverage_deg,
-                    ping_filter_stats=file_ping_filter_stats,
-                    flat_filter=args.flat_filter,
-                    flat_radius_m=args.flat_radius_m,
-                    flat_min_neighbors=args.flat_min_neighbors,
-                    flat_max_slope_deg=args.flat_max_slope_deg,
-                    flat_max_roughness_m=args.flat_max_roughness_m,
-                    flat_max_bs_std_db=args.flat_max_bs_std_db,
-                    bs_source=args.bs_source,
-                    beam_stats=beam_stats,
-                    si_window=args.si_window,
-                    extra_agg=extra_agg,
-                    extra_stats=extra_stats,
-                )
+                accumulate_one(input_file, file_ping_filter_stats, file_error_log)
             )
-        else:
-            record_count, sounding_before_geometry, sounding_after_geometry, sounding_used = (
-                accumulate_all_file(
-                    input_file,
-                    agg=agg,
-                    raw_depth_modes=raw_depth_modes,
-                    pre_geometry_counts=pre_geometry_counts,
-                    pre_flat_counts=pre_flat_counts,
-                    reflectivity_source=args.reflectivity_source,
-                    angle_bin_size=args.angle_bin_deg,
-                    valid_only=not args.include_invalid_detections,
-                    min_depth=args.min_depth,
-                    max_depth=args.max_depth,
-                    geometry_filter=geometry_filter,
-                    spatial_projector=spatial_projector,
-                    slope_sampler=slope_sampler,
-                    bathy_sd_sampler=bathy_sd_sampler,
-                    slope_max_deg=args.slope_max_deg,
-                    bathy_sd_max_m=args.bathy_sd_max_m,
-                    min_ping_valid_fraction=args.min_ping_valid_fraction,
-                    min_ping_valid_soundings=args.min_ping_valid_soundings,
-                    min_ping_median_intensity_db=args.min_ping_median_intensity_db,
-                    max_ping_intensity_std_db=args.max_ping_intensity_std_db,
-                    max_port_starboard_diff_db=args.max_port_starboard_diff_db,
-                    min_port_starboard_soundings=args.min_port_starboard_soundings,
-                    min_ping_angle_coverage_deg=args.min_ping_angle_coverage_deg,
-                    ping_filter_stats=file_ping_filter_stats,
-                    flat_filter=args.flat_filter,
-                    flat_radius_m=args.flat_radius_m,
-                    flat_min_neighbors=args.flat_min_neighbors,
-                    flat_max_slope_deg=args.flat_max_slope_deg,
-                    flat_max_roughness_m=args.flat_max_roughness_m,
-                    flat_max_bs_std_db=args.flat_max_bs_std_db,
-                    bs_source=args.bs_source,
-                    beam_stats=beam_stats,
-                    si_window=args.si_window,
-                    extra_agg=extra_agg,
-                    extra_stats=extra_stats,
-                )
-            )
+        except Exception as exc:  # noqa: BLE001 - one bad file must not abort the survey
+            if args.on_error != "skip":
+                raise
+            failed_files += 1
+            print(f"  {input_file.name}: SKIPPED ({type(exc).__name__}: {exc})")
+            continue
+
+        total_skipped_datagrams += len(file_error_log)
         total_mrz += record_count
         total_soundings_before_geometry += sounding_before_geometry
         total_soundings_after_geometry += sounding_after_geometry
@@ -1288,12 +1288,13 @@ def main() -> None:
         for k, v in file_ping_filter_stats.items():
             total_ping_filter_stats[k] += v
 
+        skip_note = f" [{len(file_error_log)} corrupt datagram(s) skipped]" if file_error_log else ""
         if geometry_filter is not None or args.flat_filter:
             print(
                 f"  {input_file.name}: {record_count} {record_label}, "
                 f"{sounding_before_geometry} usable before geometry filter, "
                 f"{sounding_after_geometry} after geometry filter, "
-                f"{sounding_used} retained"
+                f"{sounding_used} retained{skip_note}"
             )
             if file_ping_filter_stats.get("pings_rejected", 0):
                 print(
@@ -1301,7 +1302,10 @@ def main() -> None:
                     f"{file_ping_filter_stats.get('pings_rejected', 0)} pings"
                 )
         else:
-            print(f"  {input_file.name}: {record_count} {record_label}, {sounding_used} usable soundings")
+            print(
+                f"  {input_file.name}: {record_count} {record_label}, "
+                f"{sounding_used} usable soundings{skip_note}"
+            )
 
     rows = build_rows(
         agg=agg,
@@ -1320,7 +1324,12 @@ def main() -> None:
     write_csv(rows, output_csv, flat_filter_used=args.flat_filter, extra_stats=extra_stats)
 
     print("\nDone.")
-    print(f"Files processed:                         {len(files)}")
+    print(f"Files processed:                         {len(files) - failed_files}/{len(files)}")
+    if failed_files or total_skipped_datagrams:
+        print(
+            f"Robustness (--on-error {args.on_error}):           "
+            f"{failed_files} file(s) skipped, {total_skipped_datagrams} corrupt datagram(s) skipped"
+        )
     print(f"{('MRZ datagrams' if fmt == 'kmall' else 'Pings'):24s} read:          {total_mrz}")
     print(f"Usable soundings before geometry filter: {total_soundings_before_geometry}")
     print(f"Soundings after geometry filter:         {total_soundings_after_geometry}")

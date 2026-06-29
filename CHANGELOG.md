@@ -4,6 +4,33 @@ All notable changes to `mbes-tools` are documented here. The project follows
 [semantic versioning](https://semver.org/) (currently 0.x — minor versions may
 add features; the public API is kept backward compatible where practical).
 
+## [0.5.0] - 2026-06-29
+
+### Added (Capability C — generalization for other geographies & instruments)
+- `mbes_tools.projection`: geography-agnostic target-CRS resolution —
+  `utm_epsg_from_lonlat` / `resolve_target_crs` pick the right UTM zone (or polar
+  UPS) from a position, safe across hemispheres, the antimeridian, and high
+  latitudes. No survey-specific zone is baked into library logic.
+  `SpatialProjector.from_spec(spec, lon, lat)` resolves `auto` → UTM/UPS, or an
+  explicit EPSG / PROJ string.
+- **Robustness — tolerant readers.** `mbes_tools.all.iter_datagrams` and
+  `mbes_tools.kmall.iter_mrz_datagrams` take `on_error="skip"` (+ optional
+  `error_log`), resynchronizing past a corrupt/truncated datagram to the next
+  valid one instead of raising. `mbes-bs-table --on-error skip` (default) carries
+  this through the pipeline: per-file failures are caught, corrupt datagrams are
+  counted and skipped, and a robustness summary is printed — one bad ping or
+  file never aborts a survey. gzip/zip containers are reported, not crashed.
+- **Depth-mode maps consolidated** into `mbes_tools.depth_modes`
+  (`kmall_raw_to_calib`, `kmall_depth_mode_label` alongside the .all maps);
+  `backscatter.apply.depth_mode_raw_to_calib` now delegates there.
+
+### Verified
+- Auto-UTM matches every position in the verification manifest and the Samoa
+  area (−171.8, −13.8) → EPSG:32702 (UTM 2S). Tolerant readers recover
+  downstream datagrams past injected corruption on real EM2040 `.all` and EM124
+  `.kmall`; the pipeline completes on a gzip'd `.all`. Cross-model parse sweep
+  clean across EM122/124/302/304/2040 in both formats.
+
 ## [0.4.0] - 2026-06-29
 
 ### Added (Capability B — configurable backscatter source + per-beam reducer)

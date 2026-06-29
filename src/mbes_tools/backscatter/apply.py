@@ -50,7 +50,7 @@ from mbes_tools.all import (
     parse_runtime,
     parse_seabed_image,
 )
-from mbes_tools.depth_modes import all_runtime_mode_info, mode_id_to_calib
+from mbes_tools.depth_modes import all_runtime_mode_info, kmall_raw_to_calib, mode_id_to_calib
 from mbes_tools.kmall import MRZDatagram, iter_kmall_files, iter_mrz_datagrams
 
 
@@ -86,18 +86,10 @@ def load_corrections(correction_csv: str) -> CorrectionLookup:
 def depth_mode_raw_to_calib(depth_mode_raw: int) -> int:
     """Convert a KMALL raw depthMode to a calibration-file depthMode ID.
 
-    Encoded KMALL values (manual modes)::
-
-        101 -> 2 Shallow   104 -> 5 Deeper      107 -> 8 Extreme Deep
-        102 -> 3 Medium    105 -> 6 Very Deep
-        103 -> 4 Deep      106 -> 7 Extra Deep
-
-    Compact values (auto modes) 1 -> 2 Shallow, 2 -> 3 Medium, etc.
+    Thin wrapper over :func:`mbes_tools.depth_modes.kmall_raw_to_calib`, the
+    single documented home for depth-mode maps across models/formats.
     """
-    depth_mode_raw = int(depth_mode_raw)
-    if 100 <= depth_mode_raw <= 108:
-        return depth_mode_raw - 99
-    return depth_mode_raw + 1
+    return kmall_raw_to_calib(depth_mode_raw)
 
 
 # ---------------------------------------------------------------------------

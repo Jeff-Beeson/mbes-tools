@@ -204,7 +204,26 @@ class SpatialProjector:
             raise RuntimeError(
                 "Spatial projection requires pyproj: python -m pip install pyproj"
             ) from exc
+        self.target_crs = grid_crs
         self.transformer = Transformer.from_crs("EPSG:4326", grid_crs, always_xy=True)
+
+    @classmethod
+    def from_spec(
+        cls,
+        spec,
+        lon_deg: Optional[float] = None,
+        lat_deg: Optional[float] = None,
+    ) -> "SpatialProjector":
+        """Build a projector from a CRS spec, resolving ``auto`` to a UTM/UPS zone.
+
+        ``spec`` is an explicit CRS (``EPSG:32756`` / EPSG int / PROJ string) or
+        ``auto``; for ``auto`` a representative ``lon_deg``/``lat_deg`` picks the
+        zone. No survey-specific zone is baked in. See
+        :func:`mbes_tools.projection.resolve_target_crs`.
+        """
+        from mbes_tools.projection import resolve_target_crs
+
+        return cls(resolve_target_crs(spec, lon_deg, lat_deg))
 
     def project_lonlat(self, longitude_deg: float, latitude_deg: float) -> Tuple[float, float]:
         return self.transformer.transform(longitude_deg, latitude_deg)

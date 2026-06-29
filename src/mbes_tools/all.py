@@ -391,8 +391,55 @@ def iter_all_files(path: Path, recursive: bool = False) -> List[Path]:
 # ---------------------------------------------------------------------------
 
 
+_RESYNC_SCAN_LIMIT = 8 * 1024 * 1024  # bound the forward scan when resyncing
+
+
+def _looks_like_all_header(raw16: bytes, header_offset: int, file_size: int) -> bool:
+    """Heuristic: do these 16 bytes start a plausible .all datagram?"""
+    if len(raw16) < DGM_HEADER_SIZE:
+        return False
+    nbytes, stx, type_code, _em, _date, _time = struct.unpack(DGM_HEADER_FMT, raw16)
+    if stx != STX:
+        return False
+    if not (0x20 <= type_code < 0x7F):  # printable ASCII type code
+        return False
+    total = nbytes + 4
+    if nbytes < DGM_HEADER_SIZE - 4 or header_offset + total > file_size:
+        return False
+    return True
+
+
+def _resync_all(fid, file_size: int, from_offset: int) -> Optional[int]:
+    """Scan forward for the next plausible .all datagram start; None if none.
+
+    A .all envelope has STX (0x02) as its 5th byte, so candidate header starts
+    are 4 bytes before each 0x02. Each candidate is validated by
+    :func:`_looks_like_all_header`. The scan is bounded by ``_RESYNC_SCAN_LIMIT``.
+    """
+    start = from_offset + 1
+    end = min(file_size, start + _RESYNC_SCAN_LIMIT)
+    if start >= file_size:
+        return None
+    fid.seek(start)
+    window = fid.read(end - start)
+    search = 0
+    while True:
+        idx = window.find(b"\x02", search)
+        if idx < 0:
+            return None
+        candidate = start + idx - 4
+        if candidate >= start and candidate + DGM_HEADER_SIZE <= file_size:
+            fid.seek(candidate)
+            if _looks_like_all_header(fid.read(DGM_HEADER_SIZE), candidate, file_size):
+                return candidate
+        search = idx + 1
+
+
 def iter_datagrams(
-    path: Path, types: Optional[set] = None
+    path: Path,
+    types: Optional[set] = None,
+    on_error: str = "raise",
+    error_log: Optional[list] = None,
 ) -> Iterator[DatagramRecord]:
     """Walk a .all file and yield each datagram as a raw ``DatagramRecord``.
 
@@ -410,6 +457,11 @@ def iter_datagrams(
             are read and yielded; the bodies of all others are seeked past
             without reading, which avoids paying to read large bodies
             (e.g. ``Y`` seabed image) the caller does not need.
+        on_error: ``"raise"`` (default) raises on a corrupt/truncated datagram.
+            ``"skip"`` instead resynchronizes to the next plausible datagram and
+            continues, so one bad region never aborts a survey.
+        error_log: Optional list; when given, ``(offset, message)`` tuples for
+            skipped problems are appended to it.
     """
     file_size = path.stat().st_size
     with path.open("rb") as fid:
@@ -421,27 +473,42 @@ def iter_datagrams(
                 break
 
             total_size = header.number_of_bytes + 4
+            problem: Optional[str] = None
             if header.number_of_bytes < DGM_HEADER_SIZE - 4 or offset + total_size > file_size:
-                raise RuntimeError(
-                    f"Invalid datagram length {header.number_of_bytes} at byte offset {offset} in {path}"
-                )
+                problem = f"invalid datagram length {header.number_of_bytes}"
+            elif total_size - DGM_HEADER_SIZE - DGM_FOOTER_SIZE < 0:
+                problem = f"negative body size (total={total_size})"
+
+            if problem is not None:
+                msg = f"{problem} at byte offset {offset} in {path}"
+                if on_error != "skip":
+                    raise RuntimeError(msg)
+                if error_log is not None:
+                    error_log.append((offset, msg))
+                nxt = _resync_all(fid, file_size, offset)
+                if nxt is None or nxt <= offset:
+                    break
+                offset = nxt
+                continue
 
             body_size = total_size - DGM_HEADER_SIZE - DGM_FOOTER_SIZE
-            if body_size < 0:
-                raise RuntimeError(
-                    f"Negative body size at offset {offset} in {path}: total={total_size}"
-                )
 
             if types is not None and header.type_of_datagram not in types:
                 offset += total_size
                 continue
 
+            fid.seek(offset + DGM_HEADER_SIZE)
             body = fid.read(body_size)
             if len(body) != body_size:
-                raise EOFError(
-                    f"Truncated datagram at offset {offset} in {path}: "
+                msg = (
+                    f"truncated datagram at offset {offset} in {path}: "
                     f"expected {body_size} body bytes, got {len(body)}"
                 )
+                if on_error != "skip":
+                    raise EOFError(msg)
+                if error_log is not None:
+                    error_log.append((offset, msg))
+                break  # truncation at EOF: nothing valid remains
 
             yield DatagramRecord(header=header, offset=offset, body=body)
 

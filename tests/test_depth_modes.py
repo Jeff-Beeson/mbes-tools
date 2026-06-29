@@ -35,3 +35,19 @@ def test_mode_id_to_calib_matches_kmall_convention():
     assert dm.mode_id_to_calib(1) == 2
     assert dm.mode_id_to_calib(2) == 3
     assert dm.all_mode_label(2040, 1) == "300kHz"
+
+
+def test_kmall_raw_to_calib_manual_and_auto():
+    assert dm.kmall_raw_to_calib(101) == 2   # manual Shallow
+    assert dm.kmall_raw_to_calib(106) == 7
+    assert dm.kmall_raw_to_calib(1) == 2      # auto Shallow
+    assert dm.kmall_raw_to_calib(5) == 6
+    assert dm.kmall_depth_mode_label(1) == "Shallow"
+    assert dm.kmall_depth_mode_label(5) == "Very Deep"
+
+
+def test_apply_delegates_to_depth_modes():
+    """apply.depth_mode_raw_to_calib stays in sync with the consolidated map."""
+    from mbes_tools.backscatter import apply
+    for raw in [0, 1, 5, 100, 101, 106, 108]:
+        assert apply.depth_mode_raw_to_calib(raw) == dm.kmall_raw_to_calib(raw)

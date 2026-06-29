@@ -277,6 +277,41 @@ def test_iter_datagrams_type_filter(tmp_path):
     assert kept == ["X", "Y"]
 
 
+def test_iter_datagrams_skip_resyncs_past_corruption(tmp_path):
+    """on_error='skip' resynchronizes past a corrupt datagram; 'raise' still raises."""
+    p = _build_envelope("P", b"\x00" * 22)
+    x = _build_envelope("X", b"\x00" * 24)
+    y = _build_envelope("Y", b"\x00" * 20)
+    # Inject garbage between X and Y, and clobber X's length field to overshoot EOF.
+    corrupt_x = bytearray(x)
+    corrupt_x[0:4] = struct.pack("<L", 999_999)
+    blob = p + bytes(corrupt_x) + b"\xde\xad\xbe\xef" * 5 + y
+    f = tmp_path / "corrupt.all"
+    f.write_bytes(blob)
+
+    # Strict mode raises on the bad length.
+    with pytest.raises((RuntimeError, EOFError)):
+        list(mbes_all.iter_datagrams(f))
+
+    # Skip mode logs the problem and recovers the trailing valid Y via resync.
+    log: list = []
+    types = [r.header.type_of_datagram for r in mbes_all.iter_datagrams(f, on_error="skip", error_log=log)]
+    assert "P" in types and "Y" in types
+    assert len(log) >= 1
+
+
+def test_resync_all_finds_next_boundary(tmp_path):
+    """_resync_all locates the next valid datagram start after a bad offset."""
+    p = _build_envelope("P", b"\x00" * 22)
+    y = _build_envelope("Y", b"\x00" * 20)
+    blob = p + b"\x99" * 7 + y  # 7 junk bytes between two valid datagrams
+    f = tmp_path / "j.all"
+    f.write_bytes(blob)
+    with f.open("rb") as fid:
+        nxt = mbes_all._resync_all(fid, len(blob), len(p))  # search after the first datagram
+    assert nxt == len(p) + 7  # start of the Y datagram
+
+
 # --- N/R fixture tests (real EM2040 .all, clipped) -------------------------
 
 
