@@ -13,6 +13,7 @@ v0, pre-release. Modules are being scaffolded and lifted from prior project work
 - `mbes_tools.depth_modes` — documented depth/ping-mode maps across EM models and formats (incl. EM2040 `.all` frequency modes vs `.kmall` depth modes)
 - `mbes_tools.beam_stat` — pluggable numpy reducers (mean/median/std/mode/trimmed-mean/percentile/min/max/range/count) that turn a beam's seabed-image samples into one backscatter value over a configurable sample window (backscatter **Source B**)
 - `mbes_tools.projection` — geography-agnostic target-CRS resolution: configurable EPSG or auto UTM-zone-from-position (hemisphere/antimeridian/polar-safe); no baked-in zone
+- `mbes_tools.diagnostics` — visual review suite (console script `mbes-diagnostics`): renders ARC/normalization, Source A-vs-B, multi-stat texture, `--si-window`, depth-mode split, port/starboard symmetry, swath-fan geometry, auto-UTM map, MBES_ARC parity, and corruption-recovery plots from real files (matplotlib lazy-imported)
 
 The readers stream datagram-by-datagram and accept `on_error="skip"` to resynchronize past corrupt/truncated datagrams; `mbes-bs-table`/`-apply` default to `--on-error skip` so one bad ping or file never aborts a survey.
 - `mbes_tools.wcd` — water column data (.wcd, paired with .all)
