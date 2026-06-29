@@ -13,6 +13,7 @@ v0, pre-release. Modules are being scaffolded and lifted from prior project work
 - `mbes_tools.wcd` — water column data (.wcd, paired with .all)
 - `mbes_tools.kmwcd` — water column data (.kmwcd, paired with .kmall)
 - `mbes_tools.mbsystem` — Python wrappers around MB-System CLI tools (mbinfo, mbgrid, datalist generation, format codes)
+- `mbes_tools.catalog` — inventory Kongsberg `.all`/`.kmall` files into a verification manifest (path, format, EM model, vessel, geography, depth regime, datagram types, seabed-image presence); console script `mbes-catalog`. See [docs/VERIFICATION_DATA.md](docs/VERIFICATION_DATA.md).
 - `mbes_tools.backscatter` — sector/angle backscatter normalization built on the kmall reader:
   - `table` — generate a sector/angle correction table from .kmall files (geometry mask, slope/SD grids, ping QC, flat-seafloor filter live in `qc`)
   - `normalize` — Lambertian sector balancing (headless compute)
