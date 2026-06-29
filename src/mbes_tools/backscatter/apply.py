@@ -43,6 +43,14 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from mbes_tools.all import (
+    iter_all_files,
+    iter_datagrams,
+    parse_raw_range_angle,
+    parse_runtime,
+    parse_seabed_image,
+)
+from mbes_tools.depth_modes import all_runtime_mode_info, mode_id_to_calib
 from mbes_tools.kmall import MRZDatagram, iter_kmall_files, iter_mrz_datagrams
 
 
@@ -334,17 +342,177 @@ def process_one_kmall(
         raise RuntimeError(f"No #MRZ datagrams found in {input_file}")
 
 
+def all_mode_to_calib(em_model: int, mode_byte: int) -> int:
+    """Map an .all runtime ``mode`` byte to the calibration-file mode number."""
+    mode_id, _label = all_runtime_mode_info(em_model, mode_byte)
+    return mode_id_to_calib(mode_id)
+
+
+def process_one_all(
+    input_file: Path,
+    output_file: Path,
+    correction_lookup: CorrectionLookup,
+    qa_rows: List[dict],
+    patch_dtype: str,
+    correction_units: str,
+    dry_run: bool,
+) -> None:
+    """Patch one .all file's ``Y`` seabed-image samples by sector correction.
+
+    The .all analog of :func:`process_one_kmall`. The ``Y`` datagram carries the
+    per-beam seabed-image samples but no transmit sector, so each ``Y`` is paired
+    with its ``N`` (raw range and angle) by ping counter to recover per-beam
+    sectors; the depth/ping mode comes from the most recent ``R`` runtime
+    datagram. Sample values are int16 deci-dB, like .kmall ``SIsample_desidB``.
+    """
+    if input_file.resolve() == output_file.resolve():
+        raise ValueError(f"Output path must differ from input path: {input_file}")
+
+    if not dry_run:
+        shutil.copy2(input_file, output_file)
+
+    target_file = input_file if dry_run else output_file
+    correction_keys = set(correction_lookup.keys())
+    last_mode_byte: Optional[int] = None
+    last_em_model: Optional[int] = None
+    pending_n: Dict[int, object] = {}
+    n_y = 0
+
+    for rec in iter_datagrams(input_file, types={"R", "N", "Y"}):
+        t = rec.header.type_of_datagram
+        if t == "R":
+            last_mode_byte = parse_runtime(rec).mode
+            last_em_model = rec.header.em_model
+            continue
+        if t == "N":
+            nn = parse_raw_range_angle(rec)
+            pending_n[nn.ping_counter] = nn
+            continue
+
+        # t == "Y"
+        y = parse_seabed_image(rec)
+        n_y += 1
+        nn = pending_n.get(y.counter)
+        byte_offset = int(rec.offset)
+        dg_size = int(rec.header.number_of_bytes) + 4
+        raw = read_raw_datagram_bytes(input_file, byte_offset, dg_size)
+
+        num_samples_per_beam = np.array(
+            [b.number_of_samples_per_beam for b in y.beams], dtype=int
+        )
+        si_samples = np.array(
+            [s for b in y.beams for s in b.samples], dtype=float
+        )
+
+        skip_reason: Optional[str] = None
+        if last_mode_byte is None:
+            skip_reason = "no_runtime_mode"
+        elif nn is None:
+            skip_reason = "no_rawrange_match"
+
+        if skip_reason is not None:
+            qa_rows.append({
+                "file": str(input_file),
+                "output_file": str(output_file),
+                "byte_offset": byte_offset,
+                "datagram_size": dg_size,
+                "total_SI_samples": int(np.sum(num_samples_per_beam)),
+                "n_beams": int(len(num_samples_per_beam)),
+                "n_beams_with_nonzero_correction": 0,
+                "patch_status": ("dry_run_" if dry_run else "") + skip_reason,
+                "ping_counter": int(y.counter),
+            })
+            continue
+
+        depth_mode_calib = all_mode_to_calib(int(last_em_model), int(last_mode_byte))
+        n_beams = min(len(y.beams), len(nn.beams))
+        sectors_raw = np.array([nn.beams[i].tx_sector_number for i in range(n_beams)], dtype=int)
+        sectors_calib = sectors_raw + 1
+
+        beam_corrections = np.zeros(len(y.beams), dtype=np.float32)
+        for i in range(n_beams):
+            key = (int(depth_mode_calib), 0, int(sectors_calib[i]))
+            correction = float(correction_lookup.get(key, 0.0))
+            beam_corrections[i] = (
+                correction * 10.0 if correction_units == "dB_to_desidB" else correction
+            )
+
+        corrected_si = apply_corrections_to_si_array(
+            si_samples=si_samples,
+            num_samples_per_beam=num_samples_per_beam,
+            beam_corrections=beam_corrections,
+        )
+        patched_raw, patch_status, payload_offset = patch_si_payload_in_datagram(
+            raw_datagram=raw,
+            original_si=si_samples,
+            corrected_si=corrected_si,
+            patch_dtype=patch_dtype,
+        )
+        if not dry_run and patch_status.startswith("patched"):
+            write_raw_datagram_bytes(target_file, byte_offset, patched_raw)
+
+        keys_calib = {(int(depth_mode_calib), 0, int(s)) for s in sectors_calib}
+        qa_rows.append({
+            "file": str(input_file),
+            "output_file": str(output_file),
+            "byte_offset": byte_offset,
+            "datagram_size": dg_size,
+            "total_SI_samples": int(np.sum(num_samples_per_beam)),
+            "n_beams": int(len(num_samples_per_beam)),
+            "n_beams_with_nonzero_correction": int(np.count_nonzero(beam_corrections)),
+            "mean_original_SI": float(np.nanmean(si_samples)) if si_samples.size else np.nan,
+            "mean_corrected_SI": float(np.nanmean(corrected_si)) if corrected_si.size else np.nan,
+            "patch_status": ("dry_run_" if dry_run else "") + patch_status,
+            "payload_offset_within_datagram": payload_offset,
+            "depthMode_calib_used_by_script": int(depth_mode_calib),
+            "rxFanIndex_from_all": 0,
+            "unique_txSectorNumb_raw_from_all": ";".join(str(int(x)) for x in sorted(np.unique(sectors_raw))),
+            "unique_txSectorNumb_calib_used_by_script": ";".join(str(int(x)) for x in sorted(np.unique(sectors_calib))),
+            "n_matching_correction_keys": len(keys_calib & correction_keys),
+            "ping_counter": int(y.counter),
+        })
+
+    if n_y == 0:
+        raise RuntimeError(f"No #Y (seabed image) datagrams found in {input_file}")
+
+
+def detect_apply_format_and_files(input_path: Path, fmt: str) -> Tuple[str, List[Path]]:
+    """Resolve the apply input format (``auto``|``kmall``|``all``) and files."""
+    if fmt == "kmall":
+        return "kmall", iter_kmall_files(input_path)
+    if fmt == "all":
+        return "all", iter_all_files(input_path)
+    if input_path.is_file():
+        if input_path.suffix.lower() in (".all", ".wcd"):
+            return "all", iter_all_files(input_path)
+        return "kmall", iter_kmall_files(input_path)
+    kmall_files = iter_kmall_files(input_path)
+    all_files = iter_all_files(input_path)
+    if kmall_files and all_files:
+        raise RuntimeError(
+            f"Input directory contains both .kmall and .all files: {input_path}. "
+            "Pass --format kmall or --format all to choose."
+        )
+    return ("all", all_files) if all_files else ("kmall", kmall_files)
+
+
 def main() -> None:
     import pandas as pd
 
     parser = argparse.ArgumentParser(
-        description="Apply backscatter sector corrections to KMALL seabed image samples."
+        description="Apply backscatter sector corrections to .kmall or .all seabed image samples."
     )
-    parser.add_argument("--input", required=True, help="Input .kmall file or directory of .kmall files.")
+    parser.add_argument("--input", required=True, help="Input .kmall/.all file or directory.")
     parser.add_argument("--corrections", required=True, help="Correction CSV (depthMode,rxFanIndex,txSectorNumb,correction_dB).")
-    parser.add_argument("--output-dir", required=True, help="Directory for corrected KMALL files.")
-    parser.add_argument("--suffix", default="_BSCORR", help="Suffix for corrected KMALL files. Default: _BSCORR")
-    parser.add_argument("--qa-csv", default="kmall_bs_correction_QA.csv", help="QA CSV output path.")
+    parser.add_argument("--output-dir", required=True, help="Directory for corrected output files.")
+    parser.add_argument(
+        "--format",
+        choices=["auto", "kmall", "all"],
+        default="auto",
+        help="Input format. 'auto' (default) detects .kmall vs .all from the input.",
+    )
+    parser.add_argument("--suffix", default="_BSCORR", help="Suffix for corrected files. Default: _BSCORR")
+    parser.add_argument("--qa-csv", default="mbes_bs_correction_QA.csv", help="QA CSV output path.")
     parser.add_argument(
         "--patch-dtype",
         choices=["auto", "int16", "float32"],
@@ -370,19 +538,21 @@ def main() -> None:
 
     correction_lookup = load_corrections(args.corrections)
 
-    input_files = iter_kmall_files(Path(args.input).expanduser().resolve())
+    input_path = Path(args.input).expanduser().resolve()
+    fmt, input_files = detect_apply_format_and_files(input_path, args.format)
     if not input_files:
-        raise RuntimeError(f"No .kmall files found in input: {args.input}")
+        raise RuntimeError(f"No .kmall or .all files found in input: {args.input}")
 
     output_dir = Path(args.output_dir).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     qa_rows: List[dict] = []
+    process = process_one_kmall if fmt == "kmall" else process_one_all
 
     for input_file in input_files:
         out_file = output_path_for(input_file, output_dir, args.suffix)
         print(f"Processing: {input_file.name} -> {out_file.name}")
-        process_one_kmall(
+        process(
             input_file=input_file,
             output_file=out_file,
             correction_lookup=correction_lookup,

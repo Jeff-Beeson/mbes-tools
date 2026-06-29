@@ -136,7 +136,35 @@ def test_fixture_mrz_soundings_have_valid_detections(sample_kmall):
     """A real DPDK027 ping should have plenty of valid detections."""
     for dgm in kmall.iter_mrz_datagrams(sample_kmall):
         valid_count = sum(1 for s in dgm.soundings if s.is_valid)
-        # EM2040 with ~500 beams should have hundreds of valid detections.
+        # A deep EM304 ping with ~500 beams should have hundreds of valid detections.
         assert valid_count > 100, (
             f"Ping {dgm.ping_cnt} has only {valid_count} valid soundings"
         )
+
+
+# ---------------------------------------------------------------------------
+# EM124 fixture (Samoa-matched ship sonar). Source: tests/fixtures/
+# sample_tn447_em124.kmall, clipped from cruise TN447 (R/V Thomas G. Thompson,
+# EM124, abyssal W Pacific) via clip_datagrams.py --target-type '#MRZ' -n 2.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def sample_em124_kmall():
+    p = FIXTURES / "sample_tn447_em124.kmall"
+    if not p.exists():
+        pytest.skip(f"Fixture not present: {p}")
+    return p
+
+
+def test_em124_fixture_parses_with_seabed_image(sample_em124_kmall):
+    """The EM124 (Samoa ship-matched) .kmall parses, with abyssal depths and SI samples."""
+    dgms = list(kmall.iter_mrz_datagrams(sample_em124_kmall, parse_seabed_image=True))
+    assert len(dgms) == 2
+    for dgm in dgms:
+        valid = [s for s in dgm.soundings if s.is_valid]
+        assert len(valid) > 100
+        # Abyssal western Pacific: soundings are deep.
+        assert max(s.z_m for s in valid) > 3000
+        # Seabed-image samples are present for backscatter work.
+        assert dgm.si_sample_desidb

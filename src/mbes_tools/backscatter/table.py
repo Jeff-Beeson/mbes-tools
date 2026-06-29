@@ -46,6 +46,7 @@ from pathlib import Path
 from statistics import mean, median
 from typing import Dict, List, Optional, Tuple
 
+from mbes_tools.all import iter_all_files
 from mbes_tools.kmall import MRZDatagram, iter_kmall_files, iter_mrz_datagrams
 from mbes_tools.backscatter.qc import (
     AsciiGridMask,
@@ -310,7 +311,41 @@ def process_mrz_datagram(
         )
 
     # --- Ping-level QC (bubble sweep-down / seabed-image wipeout) -----------
+    return apply_ping_qc(
+        records,
+        n_soundings,
+        min_ping_valid_fraction=min_ping_valid_fraction,
+        min_ping_valid_soundings=min_ping_valid_soundings,
+        min_ping_median_intensity_db=min_ping_median_intensity_db,
+        max_ping_intensity_std_db=max_ping_intensity_std_db,
+        max_port_starboard_diff_db=max_port_starboard_diff_db,
+        min_port_starboard_soundings=min_port_starboard_soundings,
+        min_ping_angle_coverage_deg=min_ping_angle_coverage_deg,
+        ping_filter_stats=ping_filter_stats,
+    )
 
+
+def apply_ping_qc(
+    records: List[SoundingRecord],
+    n_soundings: int,
+    *,
+    min_ping_valid_fraction: Optional[float],
+    min_ping_valid_soundings: Optional[int],
+    min_ping_median_intensity_db: Optional[float],
+    max_ping_intensity_std_db: Optional[float],
+    max_port_starboard_diff_db: Optional[float],
+    min_port_starboard_soundings: int,
+    min_ping_angle_coverage_deg: Optional[float],
+    ping_filter_stats: Optional[Dict[str, int]],
+) -> List[SoundingRecord]:
+    """Apply ping-level QC, returning the kept records (empty if the ping is rejected).
+
+    Format-agnostic: operates on ``SoundingRecord`` fields (intensity, y_m,
+    angle), so both the .kmall (``process_mrz_datagram``) and .all
+    (``process_all_ping``) front-ends share identical ping QC. ``n_soundings`` is
+    the total candidate sounding count before per-sounding filtering, used for
+    the valid-fraction test.
+    """
     if ping_filter_stats is not None:
         ping_filter_stats["pings_seen"] += 1
         ping_filter_stats["candidate_soundings_before_ping_filter"] += len(records)
@@ -642,6 +677,37 @@ def write_csv(rows: List[dict], output_csv: Path, flat_filter_used: bool) -> Non
 # ---------------------------------------------------------------------------
 
 
+def detect_format_and_files(
+    input_path: Path, fmt: str, recursive: bool = False
+) -> Tuple[str, List[Path]]:
+    """Resolve the input format and matching files.
+
+    ``fmt`` is ``auto`` | ``kmall`` | ``all``. In ``auto`` mode the format is
+    taken from a single file's extension, or from the directory contents (a
+    directory holding both is ambiguous and raises, so the user picks).
+    """
+    if fmt == "kmall":
+        return "kmall", iter_kmall_files(input_path, recursive=recursive)
+    if fmt == "all":
+        return "all", iter_all_files(input_path, recursive=recursive)
+
+    if input_path.is_file():
+        if input_path.suffix.lower() in (".all", ".wcd"):
+            return "all", iter_all_files(input_path, recursive=recursive)
+        return "kmall", iter_kmall_files(input_path, recursive=recursive)
+
+    kmall_files = iter_kmall_files(input_path, recursive=recursive)
+    all_files = iter_all_files(input_path, recursive=recursive)
+    if kmall_files and all_files:
+        raise RuntimeError(
+            f"Input directory contains both .kmall and .all files: {input_path}. "
+            "Pass --format kmall or --format all to choose."
+        )
+    if all_files:
+        return "all", all_files
+    return "kmall", kmall_files
+
+
 def _load_data_root_default() -> Optional[str]:
     """Return DATA_ROOT from the environment, loading a .env if dotenv exists."""
     try:
@@ -680,13 +746,31 @@ def main() -> None:
     parser.add_argument(
         "--recursive",
         action="store_true",
-        help="Recursively search input directory for .kmall/.km files",
+        help="Recursively search input directory for input files",
+    )
+    parser.add_argument(
+        "--format",
+        choices=["auto", "kmall", "all"],
+        default="auto",
+        help=(
+            "Input format. 'auto' (default) detects .kmall vs .all from the "
+            "input path / directory contents."
+        ),
     )
     parser.add_argument(
         "--reflectivity-field",
         choices=["reflectivity2_dB", "reflectivity1_dB"],
         default="reflectivity2_dB",
-        help="MRZ sounding field to average (default: reflectivity2_dB)",
+        help="(.kmall) MRZ sounding field to average (default: reflectivity2_dB)",
+    )
+    parser.add_argument(
+        "--reflectivity-source",
+        choices=["xyz88", "rawrange78"],
+        default="xyz88",
+        help=(
+            "(.all) per-beam reflectivity source: xyz88 = X depth datagram "
+            "(default), rawrange78 = N raw-range datagram reflectivity"
+        ),
     )
     parser.add_argument(
         "--angle-bin-deg",
@@ -885,9 +969,9 @@ def main() -> None:
     input_path = Path(args.input).expanduser().resolve()
     output_csv = Path(args.output).expanduser().resolve()
 
-    files = iter_kmall_files(input_path, recursive=args.recursive)
+    fmt, files = detect_format_and_files(input_path, args.format, recursive=args.recursive)
     if not files:
-        raise RuntimeError(f"No .kmall or .km files found for input: {input_path}")
+        raise RuntimeError(f"No .kmall/.km or .all files found for input: {input_path}")
 
     agg: Dict[Tuple[int, int, int, float], Agg] = defaultdict(Agg)
     raw_depth_modes: Dict[Tuple[int, int, int, float], set] = defaultdict(set)
@@ -974,44 +1058,84 @@ def main() -> None:
             f"max_bs_std={args.flat_max_bs_std_db} dB"
         )
 
-    for kmall_file in files:
+    record_label = "MRZ" if fmt == "kmall" else "pings"
+    if fmt == "all":
+        from mbes_tools.backscatter.all_table import accumulate_all_file
+
+    for input_file in files:
         file_ping_filter_stats: Dict[str, int] = defaultdict(int)
-        mrz_count, sounding_before_geometry, sounding_after_geometry, sounding_used = (
-            accumulate_file(
-                kmall_file=kmall_file,
-                agg=agg,
-                raw_depth_modes=raw_depth_modes,
-                pre_geometry_counts=pre_geometry_counts,
-                pre_flat_counts=pre_flat_counts,
-                reflectivity_field=args.reflectivity_field,
-                angle_bin_size=args.angle_bin_deg,
-                normalize_manual_depth_modes=not args.keep_manual_depth_mode_offset,
-                valid_only=not args.include_invalid_detections,
-                min_depth=args.min_depth,
-                max_depth=args.max_depth,
-                geometry_filter=geometry_filter,
-                spatial_projector=spatial_projector,
-                slope_sampler=slope_sampler,
-                bathy_sd_sampler=bathy_sd_sampler,
-                slope_max_deg=args.slope_max_deg,
-                bathy_sd_max_m=args.bathy_sd_max_m,
-                min_ping_valid_fraction=args.min_ping_valid_fraction,
-                min_ping_valid_soundings=args.min_ping_valid_soundings,
-                min_ping_median_intensity_db=args.min_ping_median_intensity_db,
-                max_ping_intensity_std_db=args.max_ping_intensity_std_db,
-                max_port_starboard_diff_db=args.max_port_starboard_diff_db,
-                min_port_starboard_soundings=args.min_port_starboard_soundings,
-                min_ping_angle_coverage_deg=args.min_ping_angle_coverage_deg,
-                ping_filter_stats=file_ping_filter_stats,
-                flat_filter=args.flat_filter,
-                flat_radius_m=args.flat_radius_m,
-                flat_min_neighbors=args.flat_min_neighbors,
-                flat_max_slope_deg=args.flat_max_slope_deg,
-                flat_max_roughness_m=args.flat_max_roughness_m,
-                flat_max_bs_std_db=args.flat_max_bs_std_db,
+        if fmt == "kmall":
+            record_count, sounding_before_geometry, sounding_after_geometry, sounding_used = (
+                accumulate_file(
+                    kmall_file=input_file,
+                    agg=agg,
+                    raw_depth_modes=raw_depth_modes,
+                    pre_geometry_counts=pre_geometry_counts,
+                    pre_flat_counts=pre_flat_counts,
+                    reflectivity_field=args.reflectivity_field,
+                    angle_bin_size=args.angle_bin_deg,
+                    normalize_manual_depth_modes=not args.keep_manual_depth_mode_offset,
+                    valid_only=not args.include_invalid_detections,
+                    min_depth=args.min_depth,
+                    max_depth=args.max_depth,
+                    geometry_filter=geometry_filter,
+                    spatial_projector=spatial_projector,
+                    slope_sampler=slope_sampler,
+                    bathy_sd_sampler=bathy_sd_sampler,
+                    slope_max_deg=args.slope_max_deg,
+                    bathy_sd_max_m=args.bathy_sd_max_m,
+                    min_ping_valid_fraction=args.min_ping_valid_fraction,
+                    min_ping_valid_soundings=args.min_ping_valid_soundings,
+                    min_ping_median_intensity_db=args.min_ping_median_intensity_db,
+                    max_ping_intensity_std_db=args.max_ping_intensity_std_db,
+                    max_port_starboard_diff_db=args.max_port_starboard_diff_db,
+                    min_port_starboard_soundings=args.min_port_starboard_soundings,
+                    min_ping_angle_coverage_deg=args.min_ping_angle_coverage_deg,
+                    ping_filter_stats=file_ping_filter_stats,
+                    flat_filter=args.flat_filter,
+                    flat_radius_m=args.flat_radius_m,
+                    flat_min_neighbors=args.flat_min_neighbors,
+                    flat_max_slope_deg=args.flat_max_slope_deg,
+                    flat_max_roughness_m=args.flat_max_roughness_m,
+                    flat_max_bs_std_db=args.flat_max_bs_std_db,
+                )
             )
-        )
-        total_mrz += mrz_count
+        else:
+            record_count, sounding_before_geometry, sounding_after_geometry, sounding_used = (
+                accumulate_all_file(
+                    input_file,
+                    agg=agg,
+                    raw_depth_modes=raw_depth_modes,
+                    pre_geometry_counts=pre_geometry_counts,
+                    pre_flat_counts=pre_flat_counts,
+                    reflectivity_source=args.reflectivity_source,
+                    angle_bin_size=args.angle_bin_deg,
+                    valid_only=not args.include_invalid_detections,
+                    min_depth=args.min_depth,
+                    max_depth=args.max_depth,
+                    geometry_filter=geometry_filter,
+                    spatial_projector=spatial_projector,
+                    slope_sampler=slope_sampler,
+                    bathy_sd_sampler=bathy_sd_sampler,
+                    slope_max_deg=args.slope_max_deg,
+                    bathy_sd_max_m=args.bathy_sd_max_m,
+                    min_ping_valid_fraction=args.min_ping_valid_fraction,
+                    min_ping_valid_soundings=args.min_ping_valid_soundings,
+                    min_ping_median_intensity_db=args.min_ping_median_intensity_db,
+                    max_ping_intensity_std_db=args.max_ping_intensity_std_db,
+                    max_port_starboard_diff_db=args.max_port_starboard_diff_db,
+                    min_port_starboard_soundings=args.min_port_starboard_soundings,
+                    min_ping_angle_coverage_deg=args.min_ping_angle_coverage_deg,
+                    ping_filter_stats=file_ping_filter_stats,
+                    flat_filter=args.flat_filter,
+                    flat_radius_m=args.flat_radius_m,
+                    flat_min_neighbors=args.flat_min_neighbors,
+                    flat_max_slope_deg=args.flat_max_slope_deg,
+                    flat_max_roughness_m=args.flat_max_roughness_m,
+                    flat_max_bs_std_db=args.flat_max_bs_std_db,
+                )
+            )
+        total_mrz += record_count
         total_soundings_before_geometry += sounding_before_geometry
         total_soundings_after_geometry += sounding_after_geometry
         total_soundings_used += sounding_used
@@ -1020,7 +1144,7 @@ def main() -> None:
 
         if geometry_filter is not None or args.flat_filter:
             print(
-                f"  {kmall_file.name}: {mrz_count} MRZ, "
+                f"  {input_file.name}: {record_count} {record_label}, "
                 f"{sounding_before_geometry} usable before geometry filter, "
                 f"{sounding_after_geometry} after geometry filter, "
                 f"{sounding_used} retained"
@@ -1031,7 +1155,7 @@ def main() -> None:
                     f"{file_ping_filter_stats.get('pings_rejected', 0)} pings"
                 )
         else:
-            print(f"  {kmall_file.name}: {mrz_count} MRZ, {sounding_used} usable soundings")
+            print(f"  {input_file.name}: {record_count} {record_label}, {sounding_used} usable soundings")
 
     rows = build_rows(
         agg=agg,
@@ -1049,7 +1173,7 @@ def main() -> None:
 
     print("\nDone.")
     print(f"Files processed:                         {len(files)}")
-    print(f"MRZ datagrams read:                      {total_mrz}")
+    print(f"{('MRZ datagrams' if fmt == 'kmall' else 'Pings'):24s} read:          {total_mrz}")
     print(f"Usable soundings before geometry filter: {total_soundings_before_geometry}")
     print(f"Soundings after geometry filter:         {total_soundings_after_geometry}")
     print(f"Soundings used for output table:         {total_soundings_used}")

@@ -190,6 +190,129 @@ def test_iter_all_files_on_missing_path_raises():
         mbes_all.iter_all_files(Path("/nonexistent/path/that/does/not/exist"))
 
 
+def test_struct_sizes_n_and_r():
+    """N (78) and R (82) byte layouts match the documented Kongsberg sizes."""
+    # N body: ping,serial,ssp,ntx,nrx,nvalid (6*u16) + sampleFreq f32 + Dscale u32 = 12+4+4
+    assert mbes_all.N_BODY_SIZE == 20
+    # N tx sector: i16+u16+3*f32+u16+2*u8+f32 = 2+2+12+2+2+4
+    assert mbes_all.N_TX_SIZE == 24
+    # N rx beam: i16+2*u8+u16+u8+i8+f32+i16+i8+u8 = 2+2+2+1+1+4+2+1+1
+    assert mbes_all.N_RX_SIZE == 16
+    # R body (header to filterIdentifier2): 37 bytes; +16 header +3 footer = 56.
+    assert mbes_all.R_BODY_SIZE == 37
+
+
+def test_parse_raw_range_angle_roundtrip(tmp_path):
+    """Build a synthetic N datagram with 1 sector + 2 beams, parse it back."""
+    body = struct.pack("<HHHHHHfL", 100, 7, 15000, 1, 2, 2, 30000.0, 0)
+    body += struct.pack("<hHfffHBBf", 0, 0, 0.0, 0.0, 30000.0, 0, 0, 0, 0.0)  # tx sector
+    # beam 0: +25.00 deg, sector 0, valid, reflectivity -20.0 dB
+    body += struct.pack("<hBBHBbfhbB", 2500, 0, 0, 10, 5, 0, 0.05, -200, 0, 0)
+    # beam 1: -30.00 deg, sector 1, invalid (detInfo bit 7), reflectivity -25.0 dB
+    body += struct.pack("<hBBHBbfhbB", -3000, 1, 0x80, 10, 5, 0, 0.06, -250, 0, 0)
+
+    f = tmp_path / "n.all"
+    f.write_bytes(_build_envelope("N", body, em_model=2040))
+
+    dgms = list(mbes_all.iter_raw_range_angle_datagrams(f))
+    assert len(dgms) == 1
+    n = dgms[0]
+    assert n.ping_counter == 100
+    assert n.num_rx_beams == 2
+    assert n.sound_speed_m_s == pytest.approx(1500.0)
+    assert n.beams[0].beam_pointing_angle_deg == pytest.approx(25.0)
+    assert n.beams[0].tx_sector_number == 0
+    assert n.beams[0].reflectivity_db == pytest.approx(-20.0)
+    assert n.beams[0].is_valid is True
+    assert n.beams[1].beam_pointing_angle_deg == pytest.approx(-30.0)
+    assert n.beams[1].tx_sector_number == 1
+    assert n.beams[1].is_valid is False
+
+
+def test_parse_runtime_roundtrip(tmp_path):
+    """Build a synthetic R datagram and check the decoded mode byte."""
+    body = struct.pack(
+        "<HHBBBBBBHHHHHbBBBBBHBBBBHhB",
+        55,    # ping counter
+        7,     # serial
+        0, 0, 0, 0,   # status bytes
+        3,     # mode  (general model bit pattern -> Deep)
+        6,     # filter identifier
+        2, 200,        # min/max depth
+        6522,          # absorption *100 -> 65.22
+        300,           # tx pulse length
+        10,            # tx beamwidth
+        0,             # tx power (i8)
+        10, 8, 0, 40, 1,   # rxBW, rxBandwidth, mode2, tvg, srcSS
+        500,           # max port width
+        2, 70, 1, 70,  # beamSpacing, maxPortCov, yawMode, maxStbdCov
+        500,           # max stbd width
+        0,             # tx along tilt (i16)
+        0,             # filter id 2
+    )
+    f = tmp_path / "r.all"
+    f.write_bytes(_build_envelope("R", body, em_model=302))
+
+    dgms = list(mbes_all.iter_runtime_datagrams(f))
+    assert len(dgms) == 1
+    r = dgms[0]
+    assert r.ping_counter == 55
+    assert r.mode == 3
+    assert r.filter_identifier == 6
+    assert r.minimum_depth_m == 2
+    assert r.maximum_depth_m == 200
+    assert r.absorption_coefficient_db_km == pytest.approx(65.22, abs=1e-2)
+
+
+def test_iter_datagrams_type_filter(tmp_path):
+    """The types= filter yields only requested datagrams (others seeked past)."""
+    blob = (
+        _build_envelope("P", b"\x00" * 22)
+        + _build_envelope("X", b"\x00" * 24)
+        + _build_envelope("Y", b"\x00" * 20)
+    )
+    f = tmp_path / "mixed.all"
+    f.write_bytes(blob)
+    kept = [r.header.type_of_datagram for r in mbes_all.iter_datagrams(f, types={"X", "Y"})]
+    assert kept == ["X", "Y"]
+
+
+# --- N/R fixture tests (real EM2040 .all, clipped) -------------------------
+
+
+@pytest.fixture
+def sample_em2040_all():
+    p = FIXTURES / "sample_equinox_em2040.all"
+    if not p.exists():
+        pytest.skip(f"Fixture not present: {p}")
+    return p
+
+
+def test_fixture_raw_range_angle(sample_em2040_all):
+    """N datagrams parse with sane angle/sector and pair with X by ping counter."""
+    ns = list(mbes_all.iter_raw_range_angle_datagrams(sample_em2040_all))
+    xs = list(mbes_all.iter_depth_datagrams(sample_em2040_all))
+    assert ns and xs
+    n, x = ns[0], xs[0]
+    assert n.ping_counter == x.counter            # X and N share the ping counter
+    assert n.num_rx_beams == x.num_beams          # and beam count
+    angles = [b.beam_pointing_angle_deg for b in n.beams]
+    assert min(angles) < -20 and max(angles) > 20  # real swath spans nadir
+    # X valid-beam count equals the file's own num_valid_detections (validity check).
+    assert sum(1 for b in x.beams if b.is_valid) == x.num_valid_detections
+
+
+def test_fixture_runtime_mode_is_em2040_300khz(sample_em2040_all):
+    """The Equinox_2040_300kHz file's runtime mode decodes to 300 kHz."""
+    from mbes_tools.depth_modes import all_runtime_mode_info
+
+    rs = list(mbes_all.iter_runtime_datagrams(sample_em2040_all))
+    assert rs
+    r = rs[0]
+    assert r.header.em_model == 2040
+    assert all_runtime_mode_info(r.header.em_model, r.mode) == (1, "300kHz")
+
+
 # ---------------------------------------------------------------------------
 # Fixture-based integration tests.
 # Source: tests/fixtures/sample_nautilus.all, clipped from a Nautilus

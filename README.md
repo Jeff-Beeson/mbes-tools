@@ -9,15 +9,16 @@ v0, pre-release. Modules are being scaffolded and lifted from prior project work
 ## Modules
 
 - `mbes_tools.kmall` — Kongsberg .kmall reader, native #MRZ binary parser (skips unsupported #FCF and #SPE datagrams; optionally parses the seabed-image `SIsample_desidB` array)
-- `mbes_tools.all` — Kongsberg .all reader, builds on Mike's pyall / pyAllConditioner
+- `mbes_tools.all` — Kongsberg .all reader (datagrams `P` position, `X` XYZ depth, `Y` seabed image, `N` raw range/angle, `R` runtime); cross-referenced against Mike's pyall / pyAllConditioner
+- `mbes_tools.depth_modes` — documented depth/ping-mode maps across EM models and formats (incl. EM2040 `.all` frequency modes vs `.kmall` depth modes)
 - `mbes_tools.wcd` — water column data (.wcd, paired with .all)
 - `mbes_tools.kmwcd` — water column data (.kmwcd, paired with .kmall)
 - `mbes_tools.mbsystem` — Python wrappers around MB-System CLI tools (mbinfo, mbgrid, datalist generation, format codes)
 - `mbes_tools.catalog` — inventory Kongsberg `.all`/`.kmall` files into a verification manifest (path, format, EM model, vessel, geography, depth regime, datagram types, seabed-image presence); console script `mbes-catalog`. See [docs/VERIFICATION_DATA.md](docs/VERIFICATION_DATA.md).
-- `mbes_tools.backscatter` — sector/angle backscatter normalization built on the kmall reader:
-  - `table` — generate a sector/angle correction table from .kmall files (geometry mask, slope/SD grids, ping QC, flat-seafloor filter live in `qc`)
+- `mbes_tools.backscatter` — sector/angle backscatter normalization for **both .kmall and .all** (one pipeline):
+  - `table` — generate a sector/angle correction table; dispatches by file extension (`--format auto|kmall|all`). .kmall reads #MRZ; `all_table` joins per-ping `X`+`N`+`R`+`P`. Geometry mask, slope/SD grids, ping QC, and flat-seafloor filter live in `qc`.
   - `normalize` — Lambertian sector balancing (headless compute)
-  - `apply` — patch corrections into the KMALL seabed-image samples
+  - `apply` — patch corrections into the .kmall #MRZ seabed-image samples or .all `Y` seabed-image samples (dispatches by extension)
 
 ### Backscatter console scripts
 
