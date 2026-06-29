@@ -4,6 +4,20 @@ All notable changes to `mbes-tools` are documented here. The project follows
 [semantic versioning](https://semver.org/) (currently 0.x — minor versions may
 add features; the public API is kept backward compatible where practical).
 
+## [0.6.0] - 2026-06-29
+
+### Added
+- `mbes_tools.diagnostics` (`mbes-diagnostics`): a path-agnostic visual review
+  suite that renders backscatter diagnostics from real files — ARC + Lambertian
+  balancing, Source A vs Source B, multi-stat + within-beam texture, `--si-window`
+  comparison, depth-mode split, port/starboard symmetry, swath-fan geometry +
+  validity, auto-UTM map, MBES_ARC beam-level parity, and corruption-recovery.
+  matplotlib is imported lazily (the `gui` extra); the numeric helpers
+  (`all_arc_rows`, `kmall_arc_rows`, `arc_xy`, `mode_mean_curve`,
+  `fold_port_starboard`, `port_starboard_symmetry`) are dependency-light and
+  unit-tested. A gated end-to-end test renders panels when `MBES_TEST_DATA_ROOT`
+  and matplotlib are available.
+
 ## [0.5.0] - 2026-06-29
 
 ### Added (Capability C — generalization for other geographies & instruments)
