@@ -27,12 +27,15 @@ from typing import Dict, List, Optional, Tuple
 from mbes_tools.all import (
     DepthDatagram,
     RawRangeAngleDatagram,
+    SeabedImageDatagram,
     iter_datagrams,
     parse_depth,
     parse_position,
     parse_raw_range_angle,
     parse_runtime,
+    parse_seabed_image,
 )
+from mbes_tools.beam_stat import reduce_beam_multi
 from mbes_tools.depth_modes import all_runtime_mode_info
 from mbes_tools.backscatter.qc import (
     GeometryMaskFilter,
@@ -51,11 +54,7 @@ from mbes_tools.backscatter.table import (
     bin_angle,
 )
 
-# Datagram types the .all backscatter table needs; everything else is skipped.
-_NEEDED_TYPES = {"R", "N", "X", "P"}
-
-# Reflectivity sources (Capability A). Capability B adds the Y seabed-image
-# sample reduction as another source.
+# Source-A reflectivity sub-source for .all (used when bs_source="reflectivity").
 REFLECTIVITY_SOURCES = ("xyz88", "rawrange78")
 
 
@@ -84,22 +83,40 @@ def process_all_ping(
     min_port_starboard_soundings: int,
     min_ping_angle_coverage_deg: Optional[float],
     ping_filter_stats: Optional[Dict[str, int]],
+    seabed: Optional[SeabedImageDatagram] = None,
+    bs_source: str = "reflectivity",
+    beam_stats: Optional[List[str]] = None,
+    si_window: Optional[int] = None,
 ) -> List[SoundingRecord]:
     """Convert one paired ``X``+``N`` ping into filtered :class:`SoundingRecord`s.
 
-    Angle and transmit sector come from the ``N`` beam; depth coordinates and
-    reflectivity from the ``X`` beam (or ``N`` reflectivity if
-    ``reflectivity_source == "rawrange78"``). ``mode_byte`` is the most recent
-    ``R`` runtime mode; if ``None`` (no runtime seen yet) the ping is skipped.
+    Angle and transmit sector come from the ``N`` beam; depth coordinates from
+    the ``X`` beam. ``mode_byte`` is the most recent ``R`` runtime mode; if
+    ``None`` (no runtime seen yet) the ping is skipped.
+
+    Intensity source (``bs_source``):
+    - ``"reflectivity"`` (Source A): ``X`` reflectivity, or ``N`` reflectivity if
+      ``reflectivity_source == "rawrange78"``.
+    - ``"seabed_image"`` (Source B): reduce the matched ``Y`` (``seabed``) beam's
+      samples with ``beam_stats`` over ``si_window``. Requires ``seabed``.
     """
     if mode_byte is None:
         if ping_filter_stats is not None:
             ping_filter_stats["pings_skipped_no_runtime"] += 1
         return []
 
+    use_seabed_image = bs_source == "seabed_image"
+    primary_stat = (beam_stats or ["mean"])[0]
+    if use_seabed_image and seabed is None:
+        if ping_filter_stats is not None:
+            ping_filter_stats["pings_skipped_no_seabed_image"] += 1
+        return []
+
     depth_mode, _label = all_runtime_mode_info(em_model, mode_byte)
 
     n_beams = min(len(depth.beams), len(raw_range.beams))
+    if use_seabed_image:
+        n_beams = min(n_beams, len(seabed.beams))
     records: List[SoundingRecord] = []
 
     vessel_easting_m: Optional[float] = None
@@ -134,13 +151,25 @@ def process_all_ping(
         if max_depth is not None and z_m > max_depth:
             continue
 
-        intensity = (
-            xb.reflectivity_db
-            if reflectivity_source == "xyz88"
-            else nb.reflectivity_db
-        )
-        if not math.isfinite(intensity) or intensity <= -99.0:
-            continue
+        intensity_by_stat: Optional[Dict[str, float]] = None
+        if use_seabed_image:
+            yb = seabed.beams[i]
+            if yb.number_of_samples_per_beam <= 0:
+                continue
+            intensity_by_stat = reduce_beam_multi(
+                yb.samples, yb.centre_sample_number, si_window, beam_stats or ["mean"]
+            )
+            intensity = intensity_by_stat[primary_stat]
+            if not math.isfinite(intensity):
+                continue
+        else:
+            intensity = (
+                xb.reflectivity_db
+                if reflectivity_source == "xyz88"
+                else nb.reflectivity_db
+            )
+            if not math.isfinite(intensity) or intensity <= -99.0:
+                continue
 
         angle_raw = nb.beam_pointing_angle_deg
         if not math.isfinite(angle_raw):
@@ -191,6 +220,7 @@ def process_all_ping(
                 northing_m=northing_m,
                 grid_slope_deg=grid_slope_deg,
                 grid_bathy_sd_m=grid_bathy_sd_m,
+                intensity_by_stat=intensity_by_stat,
             )
         )
 
@@ -240,25 +270,39 @@ def accumulate_all_file(
     flat_max_slope_deg: float,
     flat_max_roughness_m: float,
     flat_max_bs_std_db: Optional[float],
+    bs_source: str = "reflectivity",
+    beam_stats: Optional[List[str]] = None,
+    si_window: Optional[int] = None,
+    extra_agg: Optional[Dict[str, Dict[Tuple[int, int, int, float], Agg]]] = None,
+    extra_stats: Optional[List[str]] = None,
 ) -> Tuple[int, int, int, int]:
-    """Accumulate one .all file, pairing X and N by ping counter.
+    """Accumulate one .all file, pairing X/N (and Y for Source B) by ping counter.
 
     Returns ``(ping_count, before_geometry, after_geometry, used)`` matching the
     .kmall :func:`mbes_tools.backscatter.table.accumulate_file` signature so the
     CLI can report both formats uniformly.
     """
+    use_seabed_image = bs_source == "seabed_image"
+    # Source A needs X+N; Source B also needs the Y seabed-image datagram.
+    needed = {"R", "N", "X", "P"} | ({"Y"} if use_seabed_image else set())
+
     last_mode_byte: Optional[int] = None
     last_lat: Optional[float] = None
     last_lon: Optional[float] = None
     pending_n: Dict[int, RawRangeAngleDatagram] = {}
     pending_x: Dict[int, DepthDatagram] = {}
+    pending_y: Dict[int, SeabedImageDatagram] = {}
 
     ping_count = 0
     before_geometry = 0
     after_geometry = 0
     used = 0
 
-    def handle_pair(depth: DepthDatagram, raw_range: RawRangeAngleDatagram) -> None:
+    def handle_ping(
+        depth: DepthDatagram,
+        raw_range: RawRangeAngleDatagram,
+        seabed: Optional[SeabedImageDatagram],
+    ) -> None:
         nonlocal ping_count, before_geometry, after_geometry, used
         ping_count += 1
         records = process_all_ping(
@@ -285,6 +329,10 @@ def accumulate_all_file(
             min_port_starboard_soundings=min_port_starboard_soundings,
             min_ping_angle_coverage_deg=min_ping_angle_coverage_deg,
             ping_filter_stats=ping_filter_stats,
+            seabed=seabed,
+            bs_source=bs_source,
+            beam_stats=beam_stats,
+            si_window=si_window,
         )
 
         add_pre_filter_counts(records, pre_geometry_counts)
@@ -310,9 +358,22 @@ def accumulate_all_file(
                 max_bs_std_db=flat_max_bs_std_db,
             )
 
-        used += aggregate_records(records, agg, raw_depth_modes)
+        used += aggregate_records(
+            records, agg, raw_depth_modes, extra_agg=extra_agg, extra_stats=extra_stats
+        )
 
-    for rec in iter_datagrams(all_file, types=_NEEDED_TYPES):
+    def try_emit(counter: int) -> None:
+        """Emit a ping once all required datagrams for this counter are buffered."""
+        if counter not in pending_x or counter not in pending_n:
+            return
+        if use_seabed_image and counter not in pending_y:
+            return
+        depth = pending_x.pop(counter)
+        raw_range = pending_n.pop(counter)
+        seabed = pending_y.pop(counter, None)
+        handle_ping(depth, raw_range, seabed)
+
+    for rec in iter_datagrams(all_file, types=needed):
         t = rec.header.type_of_datagram
         if t == "R":
             last_mode_byte = parse_runtime(rec).mode
@@ -321,17 +382,15 @@ def accumulate_all_file(
             last_lat, last_lon = p.latitude_deg, p.longitude_deg
         elif t == "N":
             n = parse_raw_range_angle(rec)
-            x = pending_x.pop(n.ping_counter, None)
-            if x is not None:
-                handle_pair(x, n)
-            else:
-                pending_n[n.ping_counter] = n
+            pending_n[n.ping_counter] = n
+            try_emit(n.ping_counter)
         elif t == "X":
             x = parse_depth(rec)
-            n = pending_n.pop(x.counter, None)
-            if n is not None:
-                handle_pair(x, n)
-            else:
-                pending_x[x.counter] = x
+            pending_x[x.counter] = x
+            try_emit(x.counter)
+        elif t == "Y":
+            y = parse_seabed_image(rec)
+            pending_y[y.counter] = y
+            try_emit(y.counter)
 
     return ping_count, before_geometry, after_geometry, used

@@ -87,9 +87,11 @@ class MRZSounding:
     y_m: float
     z_m: float
     # Seabed-image (sidescan) sample bookkeeping for this beam. These are needed
-    # to locate and patch the trailing SIsample_desidB array (see MRZDatagram).
+    # to locate and patch the trailing SIsample_desidB array (see MRZDatagram),
+    # and to reduce it per beam for Source-B backscatter (mbes_tools.beam_stat).
     si_start_range_samples: int = 0
     si_num_samples: int = 0
+    si_centre_sample: int = 0  # index of the bottom-detection sample within the beam's run
 
     @property
     def is_valid(self) -> bool:
@@ -351,6 +353,7 @@ def parse_mrz_datagram(
         y_re_ref_point_m = float(s[33])
         x_re_ref_point_m = float(s[34])
         si_start_range_samples = int(s[37])
+        si_centre_sample = int(s[38])
         si_num_samples = int(s[39])
 
         # Move to the declared end of the sounding record in case future versions
@@ -372,6 +375,7 @@ def parse_mrz_datagram(
                 z_m=z_re_ref_point_m,
                 si_start_range_samples=si_start_range_samples,
                 si_num_samples=si_num_samples,
+                si_centre_sample=si_centre_sample,
             )
         )
 
