@@ -275,6 +275,8 @@ def accumulate_all_file(
     si_window: Optional[int] = None,
     extra_agg: Optional[Dict[str, Dict[Tuple[int, int, int, float], Agg]]] = None,
     extra_stats: Optional[List[str]] = None,
+    on_error: str = "raise",
+    error_log: Optional[list] = None,
 ) -> Tuple[int, int, int, int]:
     """Accumulate one .all file, pairing X/N (and Y for Source B) by ping counter.
 
@@ -373,7 +375,7 @@ def accumulate_all_file(
         seabed = pending_y.pop(counter, None)
         handle_ping(depth, raw_range, seabed)
 
-    for rec in iter_datagrams(all_file, types=needed):
+    for rec in iter_datagrams(all_file, types=needed, on_error=on_error, error_log=error_log):
         t = rec.header.type_of_datagram
         if t == "R":
             last_mode_byte = parse_runtime(rec).mode

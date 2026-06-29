@@ -12,6 +12,9 @@ v0, pre-release. Modules are being scaffolded and lifted from prior project work
 - `mbes_tools.all` — Kongsberg .all reader (datagrams `P` position, `X` XYZ depth, `Y` seabed image, `N` raw range/angle, `R` runtime); cross-referenced against Mike's pyall / pyAllConditioner
 - `mbes_tools.depth_modes` — documented depth/ping-mode maps across EM models and formats (incl. EM2040 `.all` frequency modes vs `.kmall` depth modes)
 - `mbes_tools.beam_stat` — pluggable numpy reducers (mean/median/std/mode/trimmed-mean/percentile/min/max/range/count) that turn a beam's seabed-image samples into one backscatter value over a configurable sample window (backscatter **Source B**)
+- `mbes_tools.projection` — geography-agnostic target-CRS resolution: configurable EPSG or auto UTM-zone-from-position (hemisphere/antimeridian/polar-safe); no baked-in zone
+
+The readers stream datagram-by-datagram and accept `on_error="skip"` to resynchronize past corrupt/truncated datagrams; `mbes-bs-table`/`-apply` default to `--on-error skip` so one bad ping or file never aborts a survey.
 - `mbes_tools.wcd` — water column data (.wcd, paired with .all)
 - `mbes_tools.kmwcd` — water column data (.kmwcd, paired with .kmall)
 - `mbes_tools.mbsystem` — Python wrappers around MB-System CLI tools (mbinfo, mbgrid, datalist generation, format codes)

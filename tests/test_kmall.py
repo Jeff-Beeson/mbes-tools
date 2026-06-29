@@ -77,6 +77,41 @@ def test_mrz_sounding_is_valid_flag():
     assert not extra_detection.is_valid
 
 
+def _kdg(type4: bytes, payload: bytes = b"") -> bytes:
+    """A minimal kmall datagram envelope: uint32 size + 4-byte type + payload."""
+    size = 8 + len(payload)
+    return struct.pack("<I4s", size, type4) + payload
+
+
+def test_resync_kmall_finds_next_datagram(tmp_path):
+    """_resync_kmall locates the next #XXX datagram after a bad offset."""
+    d0 = _kdg(b"#SPO", b"\x00" * 12)
+    d1 = _kdg(b"#SVP", b"\x11" * 16)
+    blob = d0 + b"\x99" * 5 + d1
+    f = tmp_path / "j.kmall"
+    f.write_bytes(blob)
+    with f.open("rb") as fid:
+        nxt = kmall._resync_kmall(fid, len(blob), len(d0))
+    assert nxt == len(d0) + 5  # start of the #SVP datagram
+
+
+def test_iter_mrz_on_error_skip_vs_raise(tmp_path):
+    """A corrupt leading length: skip resyncs and never raises; raise raises."""
+    good_tail = _kdg(b"#SPO", b"\x00" * 8) + _kdg(b"#SVP", b"\x00" * 8)
+    blob = struct.pack("<I4s", 3, b"#SPO") + b"\x00\x00\x00" + good_tail  # bad size (<8)
+    f = tmp_path / "c.kmall"
+    f.write_bytes(blob)
+
+    with pytest.raises(RuntimeError):
+        list(kmall.iter_mrz_datagrams(f))
+
+    log: list = []
+    # No #MRZ present, but skip must not raise and must record the problem.
+    out = list(kmall.iter_mrz_datagrams(f, on_error="skip", error_log=log))
+    assert out == []
+    assert len(log) >= 1
+
+
 def test_iter_kmall_files_on_missing_path_raises():
     with pytest.raises(FileNotFoundError):
         kmall.iter_kmall_files(Path("/nonexistent/path/that/does/not/exist"))

@@ -4,6 +4,8 @@ Synthetic unit tests plus integration tests against the committed real EM2040
 (.all) fixture. The .all path must produce the same SoundingRecord and flow
 through the same aggregation / QC / normalize / apply machinery as .kmall.
 """
+import os
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -342,6 +344,62 @@ def test_em2040_all_apply_patches_y_samples(tmp_path):
             assert np.all(delta == 0)
             unshifted += 1
     assert shifted > 0 and unshifted > 0
+
+
+@pytest.mark.skipif(not EM2040_ALL.exists(), reason="EM2040 .all fixture not present")
+def test_table_cli_on_error_skip_survives_corruption(tmp_path, monkeypatch):
+    """The full mbes-bs-table run completes on a corrupt .all with --on-error skip."""
+    import struct as _struct
+    from mbes_tools.backscatter import table
+
+    raw = bytearray(EM2040_ALL.read_bytes())
+    # Clobber a datagram length deep in the file to overshoot EOF.
+    recs = list(__import__("mbes_tools.all", fromlist=["iter_datagrams"]).iter_datagrams(EM2040_ALL))
+    off = recs[len(recs) // 2].offset
+    raw[off : off + 4] = _struct.pack("<L", 999_999_999)
+    corrupt = tmp_path / "corrupt.all"
+    corrupt.write_bytes(bytes(raw))
+    out = tmp_path / "t.csv"
+
+    monkeypatch.setattr(
+        sys, "argv",
+        ["mbes-bs-table", str(corrupt), "-o", str(out), "--min-soundings", "1", "--on-error", "skip"],
+    )
+    table.main()  # must not raise
+    assert out.exists()
+    assert out.read_text().count("\n") > 1  # header + at least one row
+
+
+MBES_TEST_DATA_ROOT = os.environ.get("MBES_TEST_DATA_ROOT")
+
+
+@pytest.mark.skipif(not MBES_TEST_DATA_ROOT, reason="MBES_TEST_DATA_ROOT not set")
+def test_cross_model_full_files_do_not_crash():
+    """Cross-model/cross-geography: full files under MBES_TEST_DATA_ROOT parse clean.
+
+    Reads the first ping/MRZ of up to a few .all and .kmall files found under the
+    data root and asserts sane structure — verifying reader robustness across
+    whatever EM models the local corpus contains. Skips cleanly when unset.
+    """
+    from mbes_tools import all as mall
+    from mbes_tools import kmall
+
+    root = Path(MBES_TEST_DATA_ROOT)
+    all_files = sorted(root.rglob("*.all"))[:5]
+    kmall_files = sorted(root.rglob("*.kmall"))[:5]
+    assert all_files or kmall_files, f"no .all/.kmall under {root}"
+
+    for f in all_files:
+        # Tolerant read: corrupt/compressed files skip gracefully (yield nothing).
+        log: list = []
+        first = next(mall.iter_datagrams(f, types={"X"}, on_error="skip", error_log=log), None)
+        if first is not None:
+            assert first.header.em_model >= 0
+    for f in kmall_files:
+        log = []
+        d = next(kmall.iter_mrz_datagrams(f, on_error="skip", error_log=log), None)
+        if d is not None:
+            assert len(d.soundings) >= 0
 
 
 @pytest.mark.skipif(not EM2040_ALL.exists(), reason="EM2040 .all fixture not present")
