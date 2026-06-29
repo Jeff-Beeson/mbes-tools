@@ -4,6 +4,32 @@ All notable changes to `mbes-tools` are documented here. The project follows
 [semantic versioning](https://semver.org/) (currently 0.x — minor versions may
 add features; the public API is kept backward compatible where practical).
 
+## [0.4.0] - 2026-06-29
+
+### Added (Capability B — configurable backscatter source + per-beam reducer)
+- `mbes_tools.beam_stat`: a pluggable numpy registry that reduces a beam's
+  seabed-image sample array to one dB value — `mean`, `median`, `std`, `var`,
+  `mode`, `trimmed_mean`, `min`, `max`, `range`, `count`, and `p<NN>`
+  percentiles — over a selectable sample window (`window_bounds`) around the
+  bottom-detection (centre) sample. `std`/`var`/`range` double as within-beam
+  texture features.
+- **Source B** (seabed-image samples reduced per beam) wired into **both**
+  front-ends alongside the existing **Source A** (per-beam reflectivity):
+  `--bs-source reflectivity|seabed_image`, `--beam-stat` (list), `--si-window`.
+  .kmall reduces `SIsample_desidB`; .all reduces the matched `Y` datagram
+  (paired with `N`/`X` by ping counter). `kmall.MRZSounding.si_centre_sample`
+  is now parsed.
+- **Multi-stat single-read pass**: `SoundingRecord.intensity_by_stat` plus
+  `extra_agg`/`extra_stats` plumbing let several reducers be compared in one
+  read; each appears as `avgIntensity_<stat>_dB` / `stdIntensity_<stat>_dB`
+  columns in the table CSV.
+
+### Verified
+- **Beam-level MBES_ARC parity**: across 2,160 real EM302 `Y` beams,
+  `beam_stat` `mean` reproduces MBES_ARC's per-beam ARC value (`sum/len/10`) to
+  ~1e-14 dB. On full EM2040 (170,682 soundings) Source A and Source B correlate
+  at 0.85 with a 0.18 dB median offset.
+
 ## [0.3.0] - 2026-06-29
 
 ### Added (Capability A — .all backscatter parity)

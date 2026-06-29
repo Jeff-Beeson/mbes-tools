@@ -15,7 +15,9 @@ from mbes_tools.all import (
     DepthDatagram,
     RawRangeAngleBeam,
     RawRangeAngleDatagram,
+    SeabedImageDatagram,
     XBeam,
+    YBeam,
 )
 from mbes_tools.backscatter import normalize
 from mbes_tools.backscatter.all_table import accumulate_all_file, process_all_ping
@@ -140,6 +142,83 @@ def test_process_all_ping_skips_when_no_runtime():
     assert stats["pings_skipped_no_runtime"] == 1
 
 
+def _seabed(counter, beams_samples):
+    """Build a SeabedImageDatagram with the given per-beam sample lists."""
+    beams = [
+        YBeam(
+            sorting_direction=0,
+            detection_info=0,
+            number_of_samples_per_beam=len(s),
+            centre_sample_number=len(s) // 2,
+            samples=tuple(s),
+        )
+        for s in beams_samples
+    ]
+    return SeabedImageDatagram(
+        header=_hdr(), counter=counter, serial_number=7, sample_frequency_hz=30000.0,
+        range_to_normal_incidence_samples=0, normal_incidence_bs_db=-25,
+        oblique_bs_db=-35, tx_beam_width_deg=1.0, tvg_crossover_deg=45.0,
+        num_beams=len(beams), beams=beams,
+    )
+
+
+def test_process_all_ping_source_b_reduces_seabed_image():
+    """Source B reduces each Y beam's samples; primary stat drives intensity."""
+    x = DepthDatagram(
+        header=_hdr(), counter=1, serial_number=7, heading_deg=0.0,
+        sound_speed_at_transducer_m_s=1500.0, transducer_depth_m=3.0,
+        num_beams=2, num_valid_detections=2, sample_frequency_hz=30000.0,
+        scanning_info=0, beams=[_xbeam(100.0, -50.0, -25.0), _xbeam(100.0, 50.0, -30.0)],
+    )
+    n = RawRangeAngleDatagram(
+        header=_hdr(), ping_counter=1, serial_number=7, sound_speed_m_s=1500.0,
+        num_tx_sectors=2, num_rx_beams=2, num_valid_detections=2,
+        sample_frequency_hz=30000.0,
+        beams=[_nbeam(-25.0, 0, -22.0), _nbeam(25.0, 1, -28.0)],
+    )
+    # beam0 samples mean = -20 dB; beam1 samples mean = -45 dB.
+    y = _seabed(1, [[-100, -200, -300], [-400, -500]])
+
+    recs = process_all_ping(
+        x, n, mode_byte=1, em_model=2040, latitude_deg=None, longitude_deg=None,
+        reflectivity_source="xyz88", angle_bin_size=1.0, valid_only=True,
+        min_depth=None, max_depth=None, spatial_projector=None,
+        slope_sampler=None, bathy_sd_sampler=None, rx_fan_index=0,
+        ping_filter_stats=None, seabed=y, bs_source="seabed_image",
+        beam_stats=["mean", "std"], si_window=None, **_ping_qc_off(),
+    )
+    assert len(recs) == 2
+    assert recs[0].intensity == pytest.approx(-20.0)   # mean of beam0 samples
+    assert recs[1].intensity == pytest.approx(-45.0)
+    assert recs[0].intensity_by_stat["mean"] == pytest.approx(-20.0)
+    assert "std" in recs[0].intensity_by_stat
+
+
+def test_process_all_ping_source_b_requires_seabed():
+    x = DepthDatagram(
+        header=_hdr(), counter=1, serial_number=7, heading_deg=0.0,
+        sound_speed_at_transducer_m_s=1500.0, transducer_depth_m=3.0,
+        num_beams=1, num_valid_detections=1, sample_frequency_hz=30000.0,
+        scanning_info=0, beams=[_xbeam(100.0, -50.0, -25.0)],
+    )
+    n = RawRangeAngleDatagram(
+        header=_hdr(), ping_counter=1, serial_number=7, sound_speed_m_s=1500.0,
+        num_tx_sectors=1, num_rx_beams=1, num_valid_detections=1,
+        sample_frequency_hz=30000.0, beams=[_nbeam(-25.0, 0, -22.0)],
+    )
+    stats: dict = defaultdict(int)
+    recs = process_all_ping(
+        x, n, mode_byte=1, em_model=2040, latitude_deg=None, longitude_deg=None,
+        reflectivity_source="xyz88", angle_bin_size=1.0, valid_only=True,
+        min_depth=None, max_depth=None, spatial_projector=None,
+        slope_sampler=None, bathy_sd_sampler=None, rx_fan_index=0,
+        ping_filter_stats=stats, seabed=None, bs_source="seabed_image",
+        beam_stats=["mean"], si_window=None, **_ping_qc_off(),
+    )
+    assert recs == []
+    assert stats["pings_skipped_no_seabed_image"] == 1
+
+
 def test_detect_format_and_files(tmp_path):
     a = tmp_path / "x.all"
     a.write_bytes(b"")
@@ -154,12 +233,15 @@ def test_detect_format_and_files(tmp_path):
 # --- Integration against real .all fixtures --------------------------------
 
 
-def _run_table(fixture, reflectivity_source="xyz88", min_soundings=1):
+def _run_table(fixture, reflectivity_source="xyz88", min_soundings=1,
+               bs_source="reflectivity", beam_stats=None, si_window=None):
     agg = defaultdict(Agg)
     raw = defaultdict(set)
     pg = defaultdict(int)
     pf = defaultdict(int)
     stats: dict = defaultdict(int)
+    extra_stats = list(beam_stats) if (bs_source == "seabed_image" and beam_stats) else []
+    extra_agg = {s: defaultdict(Agg) for s in extra_stats}
     pings, before, after, used = accumulate_all_file(
         Path(fixture), agg, raw, pg, pf,
         reflectivity_source=reflectivity_source, angle_bin_size=1.0, valid_only=True,
@@ -167,11 +249,13 @@ def _run_table(fixture, reflectivity_source="xyz88", min_soundings=1):
         slope_sampler=None, bathy_sd_sampler=None, slope_max_deg=None, bathy_sd_max_m=None,
         ping_filter_stats=stats, flat_filter=False, flat_radius_m=50.0,
         flat_min_neighbors=50, flat_max_slope_deg=3.0, flat_max_roughness_m=1.0,
-        flat_max_bs_std_db=None, **_ping_qc_off(),
+        flat_max_bs_std_db=None, bs_source=bs_source, beam_stats=beam_stats,
+        si_window=si_window, extra_agg=extra_agg, extra_stats=extra_stats, **_ping_qc_off(),
     )
     rows = build_rows(
         agg, raw, pg, pf, min_soundings=min_soundings, reference_group="mode_fan",
         reference_stat="median", max_abs_correction=None, flat_filter_used=False,
+        extra_agg=extra_agg, extra_stats=extra_stats,
     )
     return (pings, used), rows
 
@@ -194,6 +278,23 @@ def test_em302_all_table_is_sane():
     assert pings > 0 and used > 0 and rows
     # EM302 (general model) reports multiple transmit sectors.
     assert len({r["sector"] for r in rows}) > 1
+
+
+@pytest.mark.skipif(not EM2040_ALL.exists(), reason="EM2040 .all fixture not present")
+def test_em2040_all_source_b_multistat_table():
+    """Source B (seabed-image) on real EM2040 .all yields sane multi-stat columns."""
+    (pings, used), rows = _run_table(
+        EM2040_ALL, bs_source="seabed_image", beam_stats=["mean", "std", "p90"]
+    )
+    assert pings > 0 and used > 0 and rows
+    r = rows[0]
+    # Primary stat (mean) drives avgIntensity_dB; comparison columns are present.
+    assert r["avgIntensity_dB"] == pytest.approx(r["avgIntensity_mean_dB"])
+    assert "avgIntensity_std_dB" in r and "avgIntensity_p90_dB" in r
+    bs_vals = [row["avgIntensity_mean_dB"] for row in rows]
+    assert all(-80 < v < 10 for v in bs_vals)
+    # p90 >= mean for the same bin (upper-tail percentile of backscatter).
+    assert all(row["avgIntensity_p90_dB"] >= row["avgIntensity_mean_dB"] - 1e-6 for row in rows)
 
 
 @pytest.mark.skipif(not EM2040_ALL.exists(), reason="EM2040 .all fixture not present")

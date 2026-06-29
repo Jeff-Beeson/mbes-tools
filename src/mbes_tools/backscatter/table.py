@@ -47,6 +47,7 @@ from statistics import mean, median
 from typing import Dict, List, Optional, Tuple
 
 from mbes_tools.all import iter_all_files
+from mbes_tools.beam_stat import reduce_beam_multi
 from mbes_tools.kmall import MRZDatagram, iter_kmall_files, iter_mrz_datagrams
 from mbes_tools.backscatter.qc import (
     AsciiGridMask,
@@ -83,6 +84,10 @@ class SoundingRecord:
     local_bs_std_db: Optional[float] = None
     grid_slope_deg: Optional[float] = None
     grid_bathy_sd_m: Optional[float] = None
+    # When several beam-stats are computed in one read pass (Source B,
+    # --beam-stat list), each reducer's value is stored here keyed by stat name;
+    # `intensity` holds the primary (first) stat. None for single-value Source A.
+    intensity_by_stat: Optional[Dict[str, float]] = None
 
 
 @dataclass
@@ -221,14 +226,39 @@ def process_mrz_datagram(
     min_port_starboard_soundings: int,
     min_ping_angle_coverage_deg: Optional[float],
     ping_filter_stats: Optional[Dict[str, int]],
+    bs_source: str = "reflectivity",
+    beam_stats: Optional[List[str]] = None,
+    si_window: Optional[int] = None,
 ) -> List[SoundingRecord]:
     """Convert one MRZDatagram into filtered SoundingRecords.
 
     Parser fields come from mbes_tools.kmall.MRZDatagram / MRZSounding.
     Geometry projection, grid sampling, and ping-level QC are applied here.
+
+    ``bs_source`` selects the per-beam intensity:
+    - ``"reflectivity"`` (Source A): ``reflectivity_field`` from the sounding.
+    - ``"seabed_image"`` (Source B): reduce the sounding's SIsample_desidB run
+      with ``beam_stats`` (first is primary) over ``si_window`` samples around
+      the centre sample. Requires the datagram parsed with seabed image.
     """
     records: List[SoundingRecord] = []
     n_soundings = len(dgm.soundings)
+
+    use_seabed_image = bs_source == "seabed_image"
+    primary_stat = (beam_stats or ["mean"])[0]
+    si_flat: List[int] = []
+    si_offsets: List[int] = []
+    if use_seabed_image:
+        if dgm.si_sample_desidb is None:
+            raise ValueError(
+                "bs_source='seabed_image' requires the datagram parsed with "
+                "parse_seabed_image=True"
+            )
+        si_flat = dgm.si_sample_desidb
+        cursor = 0
+        for s in dgm.soundings:
+            si_offsets.append(cursor)
+            cursor += s.si_num_samples
 
     vessel_easting_m: Optional[float] = None
     vessel_northing_m: Optional[float] = None
@@ -246,7 +276,7 @@ def process_mrz_datagram(
         except Exception:
             vessel_easting_m = vessel_northing_m = None
 
-    for s in dgm.soundings:
+    for i, s in enumerate(dgm.soundings):
         if valid_only and not s.is_valid:
             continue
         if min_depth is not None and s.z_m < min_depth:
@@ -254,13 +284,26 @@ def process_mrz_datagram(
         if max_depth is not None and s.z_m > max_depth:
             continue
 
-        intensity = (
-            s.reflectivity2_db
-            if reflectivity_field == "reflectivity2_dB"
-            else s.reflectivity1_db
-        )
-        if not math.isfinite(intensity) or intensity <= -99.0:
-            continue
+        intensity_by_stat: Optional[Dict[str, float]] = None
+        if use_seabed_image:
+            if s.si_num_samples <= 0:
+                continue
+            start = si_offsets[i]
+            samples = si_flat[start : start + s.si_num_samples]
+            intensity_by_stat = reduce_beam_multi(
+                samples, s.si_centre_sample, si_window, beam_stats or ["mean"]
+            )
+            intensity = intensity_by_stat[primary_stat]
+            if not math.isfinite(intensity):
+                continue
+        else:
+            intensity = (
+                s.reflectivity2_db
+                if reflectivity_field == "reflectivity2_dB"
+                else s.reflectivity1_db
+            )
+            if not math.isfinite(intensity) or intensity <= -99.0:
+                continue
         if not math.isfinite(s.beam_angle_re_rx_deg):
             continue
         if not (math.isfinite(s.x_m) and math.isfinite(s.y_m) and math.isfinite(s.z_m)):
@@ -307,6 +350,7 @@ def process_mrz_datagram(
                 northing_m=northing_m,
                 grid_slope_deg=grid_slope_deg,
                 grid_bathy_sd_m=grid_bathy_sd_m,
+                intensity_by_stat=intensity_by_stat,
             )
         )
 
@@ -413,7 +457,15 @@ def aggregate_records(
     records: List[SoundingRecord],
     agg: Dict[Tuple[int, int, int, float], Agg],
     raw_depth_modes: Dict[Tuple[int, int, int, float], set],
+    extra_agg: Optional[Dict[str, Dict[Tuple[int, int, int, float], Agg]]] = None,
+    extra_stats: Optional[List[str]] = None,
 ) -> int:
+    """Aggregate records into ``agg`` (primary intensity).
+
+    When ``extra_agg`` and ``extra_stats`` are given, also aggregate each
+    record's ``intensity_by_stat[stat]`` into ``extra_agg[stat]`` so several
+    beam-stats are compared from a single read pass (Source B multi-stat).
+    """
     for rec in records:
         key = (rec.depth_mode, rec.rx_fan_index, rec.sector, rec.angle)
         agg[key].add(
@@ -425,6 +477,11 @@ def aggregate_records(
             grid_bathy_sd_m=rec.grid_bathy_sd_m,
         )
         raw_depth_modes[key].add(rec.raw_depth_mode)
+        if extra_agg is not None and extra_stats and rec.intensity_by_stat:
+            for stat in extra_stats:
+                value = rec.intensity_by_stat.get(stat)
+                if value is not None and math.isfinite(value):
+                    extra_agg[stat][key].add(value)
     return len(records)
 
 
@@ -474,6 +531,11 @@ def accumulate_file(
     flat_max_slope_deg: float,
     flat_max_roughness_m: float,
     flat_max_bs_std_db: Optional[float],
+    bs_source: str = "reflectivity",
+    beam_stats: Optional[List[str]] = None,
+    si_window: Optional[int] = None,
+    extra_agg: Optional[Dict[str, Dict[Tuple[int, int, int, float], Agg]]] = None,
+    extra_stats: Optional[List[str]] = None,
 ) -> Tuple[int, int, int, int]:
     """Accumulate one .kmall file into the aggregation dictionaries.
 
@@ -486,7 +548,9 @@ def accumulate_file(
     sounding_count_used = 0
 
     for dgm in iter_mrz_datagrams(
-        kmall_file, normalize_manual_depth_modes=normalize_manual_depth_modes
+        kmall_file,
+        normalize_manual_depth_modes=normalize_manual_depth_modes,
+        parse_seabed_image=(bs_source == "seabed_image"),
     ):
         mrz_count += 1
 
@@ -508,6 +572,9 @@ def accumulate_file(
             min_port_starboard_soundings=min_port_starboard_soundings,
             min_ping_angle_coverage_deg=min_ping_angle_coverage_deg,
             ping_filter_stats=ping_filter_stats,
+            bs_source=bs_source,
+            beam_stats=beam_stats,
+            si_window=si_window,
         )
 
         add_pre_filter_counts(records, pre_geometry_counts)
@@ -533,7 +600,9 @@ def accumulate_file(
                 max_bs_std_db=flat_max_bs_std_db,
             )
 
-        sounding_count_used += aggregate_records(records, agg, raw_depth_modes)
+        sounding_count_used += aggregate_records(
+            records, agg, raw_depth_modes, extra_agg=extra_agg, extra_stats=extra_stats
+        )
 
     return (
         mrz_count,
@@ -570,8 +639,11 @@ def build_rows(
     reference_stat: str,
     max_abs_correction: Optional[float],
     flat_filter_used: bool,
+    extra_agg: Optional[Dict[str, Dict[Tuple[int, int, int, float], Agg]]] = None,
+    extra_stats: Optional[List[str]] = None,
 ) -> List[dict]:
     rows: List[dict] = []
+    extra_stats = extra_stats or []
 
     for (depth_mode, rx_fan_index, sector, angle), a in sorted(agg.items()):
         if a.count < min_soundings:
@@ -579,25 +651,29 @@ def build_rows(
 
         key = (depth_mode, rx_fan_index, sector, angle)
         raw_modes = sorted(raw_depth_modes[key])
-        rows.append(
-            {
-                "depthMode": depth_mode,
-                "rxFanIndex": rx_fan_index,
-                "sector": sector,
-                "beam_angle_deg": angle,
-                "avgIntensity_dB": a.avg,
-                "n_soundings": a.count,
-                "n_soundings_before_geometry_filter": pre_geometry_counts.get(key, a.count),
-                "n_soundings_before_flat_filter": pre_flat_counts.get(key, a.count),
-                "stdIntensity_dB": a.std,
-                "meanLocalSlope_deg": a.mean_slope_deg if flat_filter_used else float("nan"),
-                "meanLocalRoughness_m": a.mean_roughness_m if flat_filter_used else float("nan"),
-                "meanLocalBSStd_dB": a.mean_local_bs_std_db if flat_filter_used else float("nan"),
-                "meanGridSlope_deg": a.mean_grid_slope_deg,
-                "meanGridBathySD_m": a.mean_grid_bathy_sd_m,
-                "rawDepthMode": ";".join(str(x) for x in raw_modes),
-            }
-        )
+        row = {
+            "depthMode": depth_mode,
+            "rxFanIndex": rx_fan_index,
+            "sector": sector,
+            "beam_angle_deg": angle,
+            "avgIntensity_dB": a.avg,
+            "n_soundings": a.count,
+            "n_soundings_before_geometry_filter": pre_geometry_counts.get(key, a.count),
+            "n_soundings_before_flat_filter": pre_flat_counts.get(key, a.count),
+            "stdIntensity_dB": a.std,
+            "meanLocalSlope_deg": a.mean_slope_deg if flat_filter_used else float("nan"),
+            "meanLocalRoughness_m": a.mean_roughness_m if flat_filter_used else float("nan"),
+            "meanLocalBSStd_dB": a.mean_local_bs_std_db if flat_filter_used else float("nan"),
+            "meanGridSlope_deg": a.mean_grid_slope_deg,
+            "meanGridBathySD_m": a.mean_grid_bathy_sd_m,
+            "rawDepthMode": ";".join(str(x) for x in raw_modes),
+        }
+        # Multi-stat comparison columns (one read pass): avg + std per beam-stat.
+        for stat in extra_stats:
+            sa = (extra_agg or {}).get(stat, {}).get(key)
+            row[f"avgIntensity_{stat}_dB"] = sa.avg if sa is not None else float("nan")
+            row[f"stdIntensity_{stat}_dB"] = sa.std if sa is not None else float("nan")
+        rows.append(row)
 
     if not rows:
         return []
@@ -626,7 +702,17 @@ def build_rows(
     return rows
 
 
-def write_csv(rows: List[dict], output_csv: Path, flat_filter_used: bool) -> None:
+def write_csv(
+    rows: List[dict],
+    output_csv: Path,
+    flat_filter_used: bool,
+    extra_stats: Optional[List[str]] = None,
+) -> None:
+    extra_stats = extra_stats or []
+    extra_columns: List[str] = []
+    for stat in extra_stats:
+        extra_columns += [f"avgIntensity_{stat}_dB", f"stdIntensity_{stat}_dB"]
+
     fieldnames = [
         "depthMode",
         "rxFanIndex",
@@ -645,7 +731,7 @@ def write_csv(rows: List[dict], output_csv: Path, flat_filter_used: bool) -> Non
         "meanGridSlope_deg",
         "meanGridBathySD_m",
         "rawDepthMode",
-    ]
+    ] + extra_columns
     float_fields = {
         "avgIntensity_dB",
         "fineTunedCorrection_dB",
@@ -656,7 +742,7 @@ def write_csv(rows: List[dict], output_csv: Path, flat_filter_used: bool) -> Non
         "meanLocalBSStd_dB",
         "meanGridSlope_deg",
         "meanGridBathySD_m",
-    }
+    } | set(extra_columns)
 
     with output_csv.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -768,8 +854,39 @@ def main() -> None:
         choices=["xyz88", "rawrange78"],
         default="xyz88",
         help=(
-            "(.all) per-beam reflectivity source: xyz88 = X depth datagram "
+            "(.all, Source A) per-beam reflectivity source: xyz88 = X depth datagram "
             "(default), rawrange78 = N raw-range datagram reflectivity"
+        ),
+    )
+    parser.add_argument(
+        "--bs-source",
+        choices=["reflectivity", "seabed_image"],
+        default="reflectivity",
+        help=(
+            "Backscatter source. 'reflectivity' (Source A, default) = per-beam "
+            "reflectivity. 'seabed_image' (Source B) = reduce per-beam seabed-image "
+            "samples (.kmall SIsample_desidB / .all Y) with --beam-stat."
+        ),
+    )
+    parser.add_argument(
+        "--beam-stat",
+        nargs="+",
+        default=["mean"],
+        metavar="STAT",
+        help=(
+            "(Source B) one or more per-beam reducers; the first drives the "
+            "correction table, the rest are written as comparison columns from the "
+            "same read pass. Names: mean median std var mode trimmed_mean min max "
+            "range count, or p<NN> percentile (e.g. p90). Default: mean"
+        ),
+    )
+    parser.add_argument(
+        "--si-window",
+        type=int,
+        default=None,
+        help=(
+            "(Source B) reduce only samples within +/- this many samples of each "
+            "beam's centre (bottom-detection) sample. Default: whole beam."
         ),
     )
     parser.add_argument(
@@ -973,10 +1090,23 @@ def main() -> None:
     if not files:
         raise RuntimeError(f"No .kmall/.km or .all files found for input: {input_path}")
 
+    # Source B (seabed-image) multi-stat setup. Validate beam-stat names up front.
+    use_seabed_image = args.bs_source == "seabed_image"
+    beam_stats: List[str] = list(dict.fromkeys(args.beam_stat))  # de-dup, keep order
+    extra_stats: List[str] = beam_stats if use_seabed_image and len(beam_stats) > 0 else []
+    if use_seabed_image:
+        from mbes_tools.beam_stat import get_reducer
+
+        for stat in beam_stats:
+            get_reducer(stat)  # raises ValueError on an unknown stat
+
     agg: Dict[Tuple[int, int, int, float], Agg] = defaultdict(Agg)
     raw_depth_modes: Dict[Tuple[int, int, int, float], set] = defaultdict(set)
     pre_geometry_counts: Dict[Tuple[int, int, int, float], int] = defaultdict(int)
     pre_flat_counts: Dict[Tuple[int, int, int, float], int] = defaultdict(int)
+    extra_agg: Dict[str, Dict[Tuple[int, int, int, float], Agg]] = {
+        stat: defaultdict(Agg) for stat in extra_stats
+    }
 
     geometry_filter: Optional[GeometryMaskFilter] = None
     slope_sampler: Optional[GridValueSampler] = None
@@ -1021,7 +1151,13 @@ def main() -> None:
     total_soundings_used = 0
     total_ping_filter_stats: Dict[str, int] = defaultdict(int)
 
-    print(f"Found {len(files)} file(s).")
+    print(f"Found {len(files)} {fmt} file(s).")
+    if use_seabed_image:
+        win = "full beam" if args.si_window is None else f"+/-{args.si_window} samples around centre"
+        print(
+            f"Backscatter source: seabed_image; beam-stat(s)={beam_stats} "
+            f"(primary={beam_stats[0]}); window={win}"
+        )
     if geometry_filter is not None:
         print(
             f"Geometry mask: grid={geometry_filter.mask_grid.path}, "
@@ -1098,6 +1234,11 @@ def main() -> None:
                     flat_max_slope_deg=args.flat_max_slope_deg,
                     flat_max_roughness_m=args.flat_max_roughness_m,
                     flat_max_bs_std_db=args.flat_max_bs_std_db,
+                    bs_source=args.bs_source,
+                    beam_stats=beam_stats,
+                    si_window=args.si_window,
+                    extra_agg=extra_agg,
+                    extra_stats=extra_stats,
                 )
             )
         else:
@@ -1133,6 +1274,11 @@ def main() -> None:
                     flat_max_slope_deg=args.flat_max_slope_deg,
                     flat_max_roughness_m=args.flat_max_roughness_m,
                     flat_max_bs_std_db=args.flat_max_bs_std_db,
+                    bs_source=args.bs_source,
+                    beam_stats=beam_stats,
+                    si_window=args.si_window,
+                    extra_agg=extra_agg,
+                    extra_stats=extra_stats,
                 )
             )
         total_mrz += record_count
@@ -1167,9 +1313,11 @@ def main() -> None:
         reference_stat=args.reference_stat,
         max_abs_correction=args.max_abs_correction,
         flat_filter_used=args.flat_filter,
+        extra_agg=extra_agg,
+        extra_stats=extra_stats,
     )
     rows.sort(key=lambda r: (r["depthMode"], r["rxFanIndex"], r["sector"], r["beam_angle_deg"]))
-    write_csv(rows, output_csv, flat_filter_used=args.flat_filter)
+    write_csv(rows, output_csv, flat_filter_used=args.flat_filter, extra_stats=extra_stats)
 
     print("\nDone.")
     print(f"Files processed:                         {len(files)}")

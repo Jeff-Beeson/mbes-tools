@@ -210,3 +210,68 @@ def test_seabed_image_payload_is_byte_findable():
         payload = struct.pack(f"<{len(dgm.si_sample_desidb)}h", *dgm.si_sample_desidb)
         assert payload in raw
         break
+
+
+# ---------------------------------------------------------------------------
+# Source B (seabed-image samples reduced per beam) on .kmall
+# ---------------------------------------------------------------------------
+
+from collections import defaultdict  # noqa: E402
+
+
+@pytest.mark.skipif(not FIXTURE.exists(), reason="sample kmall fixture not present")
+def test_kmall_source_b_table_multistat():
+    """Source B on .kmall reduces SIsample_desidB per beam and adds stat columns."""
+    agg = defaultdict(table.Agg)
+    raw = defaultdict(set)
+    pg = defaultdict(int)
+    pf = defaultdict(int)
+    extra_stats = ["mean", "std", "p90"]
+    extra_agg = {s: defaultdict(table.Agg) for s in extra_stats}
+    mrz, before, after, used = table.accumulate_file(
+        kmall_file=FIXTURE, agg=agg, raw_depth_modes=raw,
+        pre_geometry_counts=pg, pre_flat_counts=pf,
+        reflectivity_field="reflectivity2_dB", angle_bin_size=1.0,
+        normalize_manual_depth_modes=True, valid_only=True,
+        min_depth=None, max_depth=None, geometry_filter=None, spatial_projector=None,
+        slope_sampler=None, bathy_sd_sampler=None, slope_max_deg=None, bathy_sd_max_m=None,
+        min_ping_valid_fraction=None, min_ping_valid_soundings=None,
+        min_ping_median_intensity_db=None, max_ping_intensity_std_db=None,
+        max_port_starboard_diff_db=None, min_port_starboard_soundings=25,
+        min_ping_angle_coverage_deg=None, ping_filter_stats=defaultdict(int),
+        flat_filter=False, flat_radius_m=50.0, flat_min_neighbors=50,
+        flat_max_slope_deg=3.0, flat_max_roughness_m=1.0, flat_max_bs_std_db=None,
+        bs_source="seabed_image", beam_stats=extra_stats, si_window=None,
+        extra_agg=extra_agg, extra_stats=extra_stats,
+    )
+    assert mrz > 0 and used > 0
+    rows = table.build_rows(
+        agg, raw, pg, pf, min_soundings=1, reference_group="mode_fan",
+        reference_stat="median", max_abs_correction=None, flat_filter_used=False,
+        extra_agg=extra_agg, extra_stats=extra_stats,
+    )
+    assert rows
+    r = rows[0]
+    assert r["avgIntensity_dB"] == pytest.approx(r["avgIntensity_mean_dB"])
+    assert "avgIntensity_std_dB" in r and "avgIntensity_p90_dB" in r
+
+
+def test_kmall_source_b_requires_seabed_image_parsed():
+    """Source B errors clearly if the datagram wasn't parsed with seabed image."""
+    dgm = kmall.MRZDatagram(
+        dgm_version=1, system_id=1, echo_sounder_id=1, time_s=0, time_ns=0,
+        ping_cnt=1, rx_fans_per_ping=1, rx_fan_index=0, swaths_per_ping=1,
+        raw_depth_mode=1, depth_mode=1, num_tx_sectors=1, heading_vessel_deg=0.0,
+        latitude_deg=0.0, longitude_deg=0.0, soundings=[], si_sample_desidb=None,
+    )
+    with pytest.raises(ValueError):
+        table.process_mrz_datagram(
+            dgm=dgm, reflectivity_field="reflectivity2_dB", angle_bin_size=1.0,
+            valid_only=True, min_depth=None, max_depth=None, spatial_projector=None,
+            slope_sampler=None, bathy_sd_sampler=None,
+            min_ping_valid_fraction=None, min_ping_valid_soundings=None,
+            min_ping_median_intensity_db=None, max_ping_intensity_std_db=None,
+            max_port_starboard_diff_db=None, min_port_starboard_soundings=25,
+            min_ping_angle_coverage_deg=None, ping_filter_stats=None,
+            bs_source="seabed_image", beam_stats=["mean"], si_window=None,
+        )
