@@ -2,12 +2,15 @@
 
 **Snapshot:** 2026-06-29. This is the handoff/status doc for the
 `docs/UPGRADE_PLAN.md` work. Capabilities **A, B, C** of the plan are
-implemented, verified against real data, and **merged to `main`** (v0.6.0);
-**D** is the backlog described below.
+implemented, verified against real data, and **merged to `main`** (v0.6.0).
+**D1** (water-column reader validation, v0.7.0) is on branch
+`capability-d1/water-column-validation`; **D2/D3** are the backlog described
+below.
 
 > Read this together with `docs/UPGRADE_PLAN.md` (the spec),
 > `docs/VERIFICATION_DATA.md` (the real-data corpus + how to regenerate the
-> manifest), and `docs/DEPTH_MODES.md` (the depth/ping-mode maps).
+> manifest), `docs/DEPTH_MODES.md` (the depth/ping-mode maps), and
+> `docs/WATER_COLUMN_HANDOFF.md` (the D1 water-column design/planning handoff).
 
 ---
 
@@ -101,9 +104,13 @@ a `CHANGELOG.md` entry per capability.
 ---
 
 ## 3. Build / test status
-- **`python -m pytest -q` → 125 passed, 1 skipped** at the tip (PR #4).
-- The skip is the gated cross-model test; run it with
-  `MBES_TEST_DATA_ROOT=<dir> python -m pytest -k cross_model`.
+- **`python -m pytest -q` → 142 passed, 2 skipped** at the tip of
+  `capability-d1/water-column-validation` (131/2 on merged `main`).
+- The 2 skips are the gated cross-model test and the gated diagnostics render
+  test; run them with `MBES_TEST_DATA_ROOT=<dir>` (+ matplotlib for the render).
+  The gated real `phase_flag`-2 water-column test runs when its (large, external)
+  file is present — set `MBES_MWC_PHASE2_FILE` or drop UNH-CCOM's
+  `0004_..._HiResPhase_subset.kmall` at the path in `tests/test_kmwcd.py`.
 - **Environment:** base env has **numpy + python-dotenv only**; scipy / pandas /
   pyproj / matplotlib are **NOT installed**. Core code paths are numpy + stdlib;
   heavy deps are lazy-imported (geometry mask/projection→pyproj, flat filter/grid
@@ -149,7 +156,11 @@ a `CHANGELOG.md` entry per capability.
 - **Geometry-mask CLI default CRS is `EPSG:32610`** (Monterey). It must match the
   user's mask file; it is the one remaining literal EPSG and is a *mask* default,
   not survey projection (which is position-derived via `mbes_tools.projection`).
-- `kmwcd.py` is **not yet validated against a real `.kmwcd` fixture** (see D).
+- ~~`kmwcd.py` is not yet validated against a real `.kmwcd` fixture~~ **DONE (D1,
+  v0.7.0):** `kmwcd` (`#MWC`, `phase_flag` 0/1/2) and `wcd` (`k`) are validated
+  against real EM124/EM2040/EM122 data by exact byte reconciliation; fixtures
+  committed (see §6 D1 and `CHANGELOG.md` 0.7.0). The remaining water-column work
+  is **products** (echograms / midwater detection), not reader validation.
 
 ---
 
@@ -159,23 +170,36 @@ D is demand-driven (`UPGRADE_PLAN §1.D`: "add as project needs pull them").
 Readers already **skip** all D datagram types gracefully, so D is purely
 additive. Recommended order and concrete first steps below.
 
-### D1 (recommended first — lowest effort, data in hand): validate water column
+### D1 — validate water column — **READER VALIDATION DONE (v0.7.0)**
 - **Goal:** finish/validate the existing `wcd` (`.wcd`, `k` datagram) and
   `kmwcd` (`.kmwcd`, `#MWC`) readers against **real fixtures**, then reach
   "parity" with the backscatter path.
-- **Data in hand:** TN447 has 15 `.kmwcd` (EM124) under `MBES_TEST_DATA_ROOT`;
-  the corpus has `.wcd` (Atlantis EM122). Cut tiny fixtures with
-  `clip_datagrams.py --target-type '#MWC'` / `--target-type k`.
-- **First steps:**
-  1. Cut `sample_tn447_em124.kmwcd` + a `.wcd` clip; add fixture tests asserting
-     `#MWC`/`k` beam counts, sample-array lengths, phase-flag handling.
-  2. Validate `kmwcd` phase-sample handling (`phase_flag` 1/2) against the real
-     file (its docstring flags this as unvalidated).
-  3. Then **products** (separate PR): geo-referenced echograms / beam-fan
-     amplitude grids using `mbes_tools.projection`; optional midwater/plume
-     anomaly detection. Reuse sector/beam-angle handling from the backscatter path.
+- **Done (branch `capability-d1/water-column-validation`):**
+  1. ✅ Cut `sample_tn447_em124.kmwcd` (EM124, `phase_flag` 0),
+     `sample_em2040_wc_phase1.kmall` (EM2040, `phase_flag` 1), and
+     `sample_atlantis_em122.wcd` (EM122). Fixture tests assert beam counts,
+     sample-array lengths, sector frequencies, and **exact datagram-size byte
+     reconciliation** (the layout/phase-size oracle).
+  2. ✅ Validated `kmwcd` phase-sample handling: `phase_flag` 1 (int8, ±128 ≈
+     ±180 deg) on the committed EM2040 fixture; `phase_flag` 2 (int16, ±18000 ≈
+     ±180 deg) live + a gated test (HiRes file too large to commit). Both v1
+     (12-byte) and v2 (16-byte) beam headers exercised. `wcd` validated on all
+     1407 `k` datagrams of the Atlantis EM122 file (no drift).
+  3. ✅ **First product — visual review suite:** `mbes_tools.wc_diagnostics`
+     (`mbes-wc-diagnostics`) renders, from real files, amplitude echograms with
+     the detected-bottom overlay, geo-referenced swath wedges, nadir profiles,
+     bottom-detect/amplitude-peak alignment, `phase_flag` 1/2 phase echograms +
+     histograms, and a sector-frequency sanity panel (matplotlib lazy; numeric
+     helpers unit-tested; render test gated on matplotlib over the committed
+     fixtures). This makes the D1 validation reproducible end-to-end.
+  4. ⏭️ **Next products** (likely separate PR): true geo-referenced echogram
+     **grids/mosaics** using `mbes_tools.projection`; midwater/plume anomaly
+     detection. Reassemble fragmented `.wcd` pings by `counter` (most EM122
+     pings span multiple `k` datagrams). Note `sample_freq_Hz` is heavily
+     decimated on deep CW systems (EM122 ~67 Hz, EM124 ~127 Hz) vs ~30 kHz on
+     EM2040 — physically correct, not a bug.
 - **Why / trigger:** Samoa hydrothermal-plume / midwater detection and bottom-
-  detection QC. Validation is unblocked **now**.
+  detection QC. Reader validation complete; products are the remaining work.
 
 ### D2 (highest leverage for the general mission): GSF support
 - **Goal:** native `mbes_tools.gsf` reader so processed data (CARIS/Qimera/
@@ -205,7 +229,8 @@ additive. Recommended order and concrete first steps below.
   (Samoa EM2040) motion correction, multi-sensor fusion, GSF export.
 
 ### Suggested sequencing
-1. **D1 water-column validation** (unblocked, small, Samoa-relevant).
+1. ✅ **D1 water-column reader validation** (done, v0.7.0) → water-column
+   **products** next (echograms / midwater detection).
 2. **D2 GSF** (broadest interoperability payoff).
 3. **D3 attitude/installation** (enables precise re-georeferencing; pulls in
    when ARC refinement or GSF export needs it).

@@ -9,11 +9,27 @@ cross-referenced against UNH-CCOM's kmall library (Schmidt, Davis et al.)
 #MWC parsing in
 ``Python_KMALL/kmall_viewer/external/kmall/KMALL/kmall.py``.
 
-Status: v0. Parser written from spec + cross-reference but NOT yet
-validated against a real .kmwcd fixture file. Synthetic tests confirm
-the binary layout math; fixture-based tests pending a sample file.
-Phase-sample handling for ``phase_flag`` 1 and 2 is implemented but
-untested.
+Status: validated against real data (Capability D1). The structure was
+confirmed by exact byte reconciliation — predicting each datagram's size
+from the struct sizes and the per-beam block formula
+``numBytesPerBeamEntry + numSampleData*(1 + phaseSize)`` and matching the
+file's declared ``numBytesDgm`` — on:
+
+* TN447 EM124 ``.kmwcd`` (R/V Thompson, abyssal): 374/374 #MWC,
+  ``phase_flag`` 0, ``dgm_version`` 2 (16-byte beam entry incl. the
+  high-resolution detection field). Committed clip:
+  ``tests/fixtures/sample_tn447_em124.kmwcd``.
+* EM2040 ASV ``LowResPhase`` ``.kmall``: 40/40 #MWC, ``phase_flag`` 1
+  (int8 phase, 180/128 deg) — real phase range ±128 ≈ ±180 deg. Committed
+  clip: ``tests/fixtures/sample_em2040_wc_phase1.kmall``.
+* EM2040 ASV ``HiResPhase`` ``.kmall``: 4/4 #MWC, ``phase_flag`` 2
+  (int16 phase, 0.01 deg) — real phase range ±18000 ≈ ±180 deg. (Too
+  large to commit; validated live + a gated test.)
+
+Both the v1-style (12-byte) and v2-style (20-byte) beam headers and all
+three phase flags are exercised. A wrong phase element size would not
+reconcile to the datagram boundary, so the reconciliation pins the
+``phase_flag`` 1/2 sample sizes against real bytes.
 
 Typical usage::
 
@@ -66,9 +82,11 @@ MWC_RX_INFO_FMT = "<2H3Bb2f"
 MWC_RX_INFO_SIZE = struct.calcsize(MWC_RX_INFO_FMT)
 
 # RX Beam header.
-# v1 layout (16 bytes): beamPointAngReVertical_deg (f32), startRangeSampleNum (u16),
+# v1 layout (12 bytes): beamPointAngReVertical_deg (f32), startRangeSampleNum (u16),
 # detectedRangeInSamples (u16), beamTxSectorNum (u16), numSampleData (u16).
-# v2+ layout (20 bytes): same as v1 + detectedRangeInSamplesHighResolution (f32).
+# v2+ layout (16 bytes): same as v1 + detectedRangeInSamplesHighResolution (f32).
+# Real files carry the true entry size in numBytesPerBeamEntry (RX Info);
+# the parser always advances by that, so trailing unknown fields are tolerated.
 MWC_RX_BEAM_V1_FMT = "<f4H"
 MWC_RX_BEAM_V1_SIZE = struct.calcsize(MWC_RX_BEAM_V1_FMT)
 MWC_RX_BEAM_V2_FMT = "<f4Hf"
@@ -98,8 +116,9 @@ class MWCRxBeam:
     resolution per the Kongsberg spec — multiply by 0.5 for dB values.
 
     ``phase_samples`` is populated only when the parent datagram's
-    ``phase_flag`` is 1 (int8 phase, 180/128 deg resolution) or 2
-    (int16 phase, higher precision).
+    ``phase_flag`` is 1 (int8 phase, 180/128 deg per unit) or 2
+    (int16 phase, 0.01 deg per unit). Both are validated against real data:
+    the int8 range spans ±128 and the int16 range ±18000, i.e. ±180 deg.
     """
 
     beam_point_angle_re_vertical_deg: float

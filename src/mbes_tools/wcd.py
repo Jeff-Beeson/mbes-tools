@@ -10,6 +10,15 @@ Source: written from the public Kongsberg EM Series Data Format spec
 existing WCD-aware fork of pyall in
 ``G:\\My Drive\\[02] Work\\[10] Python\\Water_Column_Decode\\pyAllConditioner-master\\pyall.py``.
 
+Status: validated against real data (Capability D1) on the Atlantis EM122
+file ``0197_20130703_155651_Atlantis.wcd`` — all 1407 ``k`` datagrams
+reconcile exactly (predicted body == actual, modulo the single Kongsberg
+spare byte before the footer, i.e. no drift). EM122 deep-water: 8 sectors
+near 12 kHz, 288 beams, monotonic beam angles; most pings are fragmented
+across several ``k`` datagrams (``num_datagram`` > 1), which the caller
+reassembles by ``counter``. Committed clip:
+``tests/fixtures/sample_atlantis_em122.wcd`` (3 complete pings).
+
 Typical usage::
 
     from pathlib import Path
