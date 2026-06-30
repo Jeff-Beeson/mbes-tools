@@ -8,8 +8,9 @@ v0, pre-release. Modules are being scaffolded and lifted from prior project work
 
 ## Modules
 
-- `mbes_tools.kmall` — Kongsberg .kmall reader, native #MRZ binary parser (skips unsupported #FCF and #SPE datagrams; optionally parses the seabed-image `SIsample_desidB` array)
-- `mbes_tools.all` — Kongsberg .all reader (datagrams `P` position, `X` XYZ depth, `Y` seabed image, `N` raw range/angle, `R` runtime); cross-referenced against Mike's pyall / pyAllConditioner
+- `mbes_tools.kmall` — Kongsberg .kmall reader: native #MRZ binary parser (skips unsupported #FCF/#SPE; optionally parses the seabed-image `SIsample_desidB` array), plus `#SKM` attitude and `#IIP`/`#IOP` installation/runtime parsers
+- `mbes_tools.all` — Kongsberg .all reader (datagrams `P` position, `X` XYZ depth, `Y` seabed image, `N` raw range/angle, `R` runtime, `A` attitude, `I` installation); cross-referenced against Mike's pyall / pyAllConditioner
+- `mbes_tools.install_params` — structures Kongsberg install/runtime text (transducer lever arms, mount angles, waterline, EM model, serial) across the `.all` flat (`S{n}`) and `.kmall #IIP` nested (`TRAI_TX1`/`TRAI_RX1`) schemes
 - `mbes_tools.depth_modes` — documented depth/ping-mode maps across EM models and formats (incl. EM2040 `.all` frequency modes vs `.kmall` depth modes)
 - `mbes_tools.beam_stat` — pluggable numpy reducers (mean/median/std/mode/trimmed-mean/percentile/min/max/range/count) that turn a beam's seabed-image samples into one backscatter value over a configurable sample window (backscatter **Source B**)
 - `mbes_tools.projection` — geography-agnostic target-CRS resolution: configurable EPSG or auto UTM-zone-from-position (hemisphere/antimeridian/polar-safe); no baked-in zone
