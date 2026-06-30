@@ -6,6 +6,7 @@ cross-reference and has not yet seen real-world bytes — synthetic tests
 verify the binary layout math but cannot catch spec-versus-reality
 mismatches.
 """
+import os
 import struct
 from pathlib import Path
 
@@ -202,12 +203,192 @@ def test_parse_mwc_with_phase_flag_1(tmp_path):
     assert dgms[0].beams[0].phase_samples == (10, 11, 12)
 
 
+def test_parse_mwc_with_phase_flag_2(tmp_path):
+    """phase_flag=2 -> int16 phase samples follow amplitude samples per beam."""
+    blob = _build_mwc_datagram(
+        num_tx_sectors=1, num_beams=1, n_samples_per_beam=3,
+        dgm_version=2, phase_flag=2,
+    )
+    f = tmp_path / "phase2.kmwcd"
+    f.write_bytes(blob)
+
+    dgms = list(kmwcd.iter_mwc_datagrams(f))
+    assert len(dgms) == 1
+    assert dgms[0].phase_flag == 2
+    assert dgms[0].beams[0].sample_amplitudes_0p5_db == (-50, -51, -52)
+    # int16 phase: _build_mwc_datagram writes 100, 101, 102.
+    assert dgms[0].beams[0].phase_samples == (100, 101, 102)
+
+
 def test_iter_kmwcd_files_on_missing_path_raises():
     with pytest.raises(FileNotFoundError):
         kmwcd.iter_kmwcd_files(Path("/nonexistent/path/that/does/not/exist"))
 
 
-# TODO: add fixture-based integration test once a real .kmwcd sample is
-# committed under tests/fixtures/. The clip_datagrams.py clipper works
-# unchanged for .kmwcd (same envelope as .kmall) — just clip by counting
-# #MWC datagrams instead of #MRZ.
+# ---------------------------------------------------------------------------
+# Fixture-based integration tests against REAL #MWC bytes (Capability D1).
+#
+# Validation method: predict each #MWC datagram's total size from the struct
+# sizes plus the per-beam block formula and compare to the file's declared
+# numBytesDgm. A wrong struct size or phase element size will not reconcile to
+# the datagram boundary across many variable-length beams, so this check pins
+# the layout (including the phaseFlag 1/2 sample sizes) against real bytes.
+# ---------------------------------------------------------------------------
+
+FIXTURES = Path(__file__).parent / "fixtures"
+DGM_HEADER_SIZE = 20
+PARTITION_SIZE = 4
+_PHASE_SIZE = {0: 0, 1: 1, 2: 2}
+
+
+def _predict_mwc_total(fid, datagram_start: int) -> int:
+    """Recompute one #MWC datagram's total byte size straight from the file,
+    independently of mbes_tools.kmwcd, and return the predicted total
+    (which should equal the declared numBytesDgm)."""
+    fid.seek(datagram_start)
+    num_bytes_dgm, _t, ver, _sys, _echo, _ts, _tns = struct.unpack(
+        "<I4sBBHII", fid.read(DGM_HEADER_SIZE)
+    )
+    fid.seek(PARTITION_SIZE, 1)
+    cmn_start = fid.tell()
+    num_bytes_cmn = struct.unpack("<H", fid.read(2))[0]
+    fid.seek(cmn_start + num_bytes_cmn)
+    tx_start = fid.tell()
+    num_bytes_tx_info, num_tx, num_bytes_per_tx, _pad, _heave = struct.unpack(
+        "<3Hhf", fid.read(12)
+    )
+    fid.seek(tx_start + num_bytes_tx_info)
+    fid.seek(num_tx * num_bytes_per_tx, 1)
+    rx_start = fid.tell()
+    rx = struct.unpack("<2H3Bb2f", fid.read(16))
+    num_bytes_rx_info, num_beams, num_bytes_per_beam, phase_flag = rx[0], rx[1], rx[2], rx[3]
+    fid.seek(rx_start + num_bytes_rx_info)
+    phase_size = _PHASE_SIZE[phase_flag]
+    for _ in range(num_beams):
+        b_start = fid.tell()
+        ns = struct.unpack("<f4H", fid.read(12))[4]
+        fid.seek(b_start + num_bytes_per_beam)
+        fid.seek(ns * (1 + phase_size), 1)
+    consumed = fid.tell() - datagram_start
+    return consumed + 4  # trailing numBytesDgm repeat
+
+
+def _reconcile_all_mwc(path: Path) -> tuple[int, int]:
+    """Return (matched, total) #MWC datagrams whose predicted size == declared."""
+    file_size = path.stat().st_size
+    matched = total = 0
+    with path.open("rb") as fid:
+        offset = 0
+        while offset < file_size:
+            fid.seek(offset)
+            head = fid.read(8)
+            if len(head) < 8:
+                break
+            dgm_size, dgm_type = struct.unpack("<I4s", head)
+            if dgm_size < 8:
+                break
+            if dgm_type == b"#MWC":
+                total += 1
+                if _predict_mwc_total(fid, offset) == dgm_size:
+                    matched += 1
+            offset += dgm_size
+    return matched, total
+
+
+# Real EM124 abyssal water column (R/V Thompson, cruise TN447 — Samoa ship
+# match). Clipped from EM124.Data/0180_20251215_064705.kmwcd to one #MWC via
+# tests/fixtures/clip_datagrams.py --target-type '#MWC' -n 1. phaseFlag 0,
+# dgm_version 2 (16-byte beam entry with the high-resolution detection field).
+KMWCD_FIXTURE = FIXTURES / "sample_tn447_em124.kmwcd"
+
+# Real EM2040 ASV water column carrying phaseFlag 1 (low-resolution int8 phase).
+# Clipped from UNH-CCOM's 0006_20200917_015203_LowResPhase_subset.kmall to two
+# #MWC. (.kmall and .kmwcd share the #MWC framing; the reader is extension
+# agnostic.) dgm_version 0 (12-byte beam entry, no high-res field).
+PHASE1_FIXTURE = FIXTURES / "sample_em2040_wc_phase1.kmall"
+
+
+@pytest.mark.skipif(not KMWCD_FIXTURE.exists(), reason="kmwcd fixture not present")
+def test_real_em124_kmwcd_phase0():
+    """The real EM124 .kmwcd parses and reconciles to the byte; sane geometry."""
+    matched, total = _reconcile_all_mwc(KMWCD_FIXTURE)
+    assert total == 1
+    assert matched == total  # exact byte reconciliation
+
+    dgms = list(kmwcd.iter_mwc_datagrams(KMWCD_FIXTURE))
+    assert len(dgms) == 1
+    dgm = dgms[0]
+    assert dgm.echo_sounder_id == 124
+    assert dgm.dgm_version == 2
+    assert dgm.phase_flag == 0
+    assert dgm.num_tx_sectors == 8
+    assert dgm.num_beams == 512
+    assert len(dgm.beams) == 512
+    # EM124 is a ~12 kHz system: every sector's centre frequency is near 12 kHz.
+    assert all(10_000.0 < s.centre_freq_hz < 14_000.0 for s in dgm.tx_sectors)
+    # Deep-water sound speed, plausible abyssal value.
+    assert 1450.0 < dgm.sound_velocity_m_s < 1600.0
+    # Amplitude sample arrays match the declared per-beam sample counts.
+    for b in dgm.beams:
+        assert len(b.sample_amplitudes_0p5_db) == b.num_sample_data
+        assert b.phase_samples == ()  # phaseFlag 0 -> no phase
+    # v2 high-resolution detection field is present (not None).
+    assert dgm.beams[0].detected_range_samples_high_res is not None
+
+
+@pytest.mark.skipif(not PHASE1_FIXTURE.exists(), reason="phase-1 fixture not present")
+def test_real_em2040_phase_flag_1():
+    """Real phaseFlag=1 #MWC: int8 phase, one phase sample per amplitude sample,
+    values within the int8 ±180-deg (180/128 deg per unit) range."""
+    matched, total = _reconcile_all_mwc(PHASE1_FIXTURE)
+    assert total == 2
+    assert matched == total
+
+    dgms = list(kmwcd.iter_mwc_datagrams(PHASE1_FIXTURE))
+    assert len(dgms) == 2
+    dgm = dgms[0]
+    assert dgm.echo_sounder_id == 2040
+    assert dgm.phase_flag == 1
+    assert dgm.num_beams == 256
+    # EM2040 high-frequency sectors (here 190 / 220 kHz).
+    assert all(s.centre_freq_hz > 100_000.0 for s in dgm.tx_sectors)
+    all_phase = []
+    for b in dgm.beams:
+        assert len(b.sample_amplitudes_0p5_db) == b.num_sample_data
+        assert len(b.phase_samples) == b.num_sample_data  # int8 phase present
+        all_phase.extend(b.phase_samples)
+    # int8 range; real data spans the full ±180-deg phase circle.
+    assert min(all_phase) >= -128 and max(all_phase) <= 127
+    assert min(all_phase) < -100 and max(all_phase) > 100
+    # Consecutive pings.
+    assert dgms[1].ping_cnt == dgms[0].ping_cnt + 1
+
+
+# Real phaseFlag=2 (high-resolution int16 phase). The smallest such file (one
+# #MWC ≈ 2.9 MB) is too large to commit, so this test is gated on the external
+# file being present (set MBES_MWC_PHASE2_FILE, or drop UNH-CCOM's
+# 0004_..._HiResPhase_subset.kmall at the path below). Validated live during
+# D1: 4/4 #MWC reconcile; int16 phase spans ±18000 ≈ ±180 deg at 0.01 deg/unit.
+_PHASE2_DEFAULT = Path(
+    "/mnt/d/Cowork_OS/_WSL_Staging/projects/kmall-master/data/"
+    "0004_20200917_014959_HiResPhase_subset.kmall"
+)
+_PHASE2_FILE = Path(os.environ.get("MBES_MWC_PHASE2_FILE", _PHASE2_DEFAULT))
+
+
+@pytest.mark.skipif(not _PHASE2_FILE.exists(), reason="phase-2 (HiRes) file not present")
+def test_real_phase_flag_2_int16():
+    """Real phaseFlag=2 #MWC: int16 phase, full ±180-deg span at 0.01 deg/unit."""
+    matched, total = _reconcile_all_mwc(_PHASE2_FILE)
+    assert total >= 1
+    assert matched == total
+
+    dgm = next(kmwcd.iter_mwc_datagrams(_PHASE2_FILE))
+    assert dgm.phase_flag == 2
+    all_phase = []
+    for b in dgm.beams:
+        assert len(b.phase_samples) == b.num_sample_data
+        all_phase.extend(b.phase_samples)
+    # 0.01 deg/unit -> ±180 deg ~ ±18000; int16 capable, real data spans it.
+    assert min(all_phase) < -15_000 and max(all_phase) > 15_000
+    assert -32_768 <= min(all_phase) and max(all_phase) <= 32_767

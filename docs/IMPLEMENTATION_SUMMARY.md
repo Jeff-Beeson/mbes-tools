@@ -7,9 +7,12 @@ for the test corpus see `docs/VERIFICATION_DATA.md`; for mode maps see
 `docs/DEPTH_MODES.md`.
 
 **Status:** UPGRADE_PLAN Capabilities **A, B, C done & on `main`** (v0.6.0);
-**D** = backlog (not started); **Samoa acceptance** pending data download.
-**Tests:** `python -m pytest -q` → 131 passed, 2 skipped (2 gated on
-`MBES_TEST_DATA_ROOT` + matplotlib).
+**D1 water-column reader validation done** (v0.7.0, branch
+`capability-d1/water-column-validation`); **D2/D3** = backlog; **Samoa
+acceptance** pending data download.
+**Tests:** `python -m pytest -q` → 142 passed, 2 skipped (2 gated on
+`MBES_TEST_DATA_ROOT` + matplotlib; a 3rd water-column test runs when the large
+external `phase_flag`-2 file is present).
 **Dependency contract:** core paths are **numpy + stdlib only**; scipy / pandas /
 pyproj / matplotlib are lazy-imported optional extras. `samoa_cm_tools` imports
 `mbes_tools` **unchanged** (backward compatible).
@@ -99,18 +102,23 @@ pyproj / matplotlib are lazy-imported optional extras. `samoa_cm_tools` imports
 
 ## New public API & CLI (quick reference)
 - **Modules added:** `mbes_tools.catalog`, `.depth_modes`, `.beam_stat`,
-  `.projection`, `.diagnostics`, `.backscatter.all_table`.
+  `.projection`, `.diagnostics`, `.backscatter.all_table`; **D1:**
+  `.wc_diagnostics` (water-column review suite; `.kmwcd`/`.wcd` readers
+  validated).
 - **Console scripts:** `mbes-bs-table`, `mbes-bs-apply` (both `--format`-dispatched),
-  `mbes-bs-gui`, `mbes-catalog`, `mbes-diagnostics`.
+  `mbes-bs-gui`, `mbes-catalog`, `mbes-diagnostics`, `mbes-wc-diagnostics`.
 - **New table/apply flags:** `--format`, `--reflectivity-source`, `--bs-source`,
   `--beam-stat`, `--si-window`, `--on-error`.
 
 ## Committed fixtures
 `tests/fixtures/`: `sample_equinox_em2040.all` (EM2040, Samoa AUV match),
-`sample_tn447_em124.kmall` (EM124, Samoa ship match), plus pre-existing
-`sample_nautilus.all` (EM302) and `sample_dpdk027.kmall` (EM304). Cut with
-`tests/fixtures/clip_datagrams.py`. Full surveys stay external under
-`MBES_TEST_DATA_ROOT`.
+`sample_tn447_em124.kmall` (EM124, Samoa ship match), pre-existing
+`sample_nautilus.all` (EM302) and `sample_dpdk027.kmall` (EM304), plus the D1
+water-column clips `sample_tn447_em124.kmwcd` (EM124 `#MWC`, `phase_flag` 0),
+`sample_em2040_wc_phase1.kmall` (EM2040 `#MWC`, `phase_flag` 1 int8 phase), and
+`sample_atlantis_em122.wcd` (EM122 `k`). Cut with
+`tests/fixtures/clip_datagrams.py`. Full surveys (and the large `phase_flag`-2
+`#MWC` file) stay external under `MBES_TEST_DATA_ROOT` / `MBES_MWC_PHASE2_FILE`.
 
 ## Conventions / decisions
 - One capability per branch + PR (stacked, merge commits not squash); verify each
@@ -127,16 +135,20 @@ pyproj / matplotlib are lazy-imported optional extras. `samoa_cm_tools` imports
   document the normalization decision per system).
 - **MBES_ARC aggregate `.mat` parity** not committed (scipy not in base env) —
   parity proven at the beam level instead.
-- `kmwcd.py` **not yet validated** against a real `.kmwcd` fixture (TN447 data now
-  in hand — D1 candidate).
+- ~~`kmwcd.py` not yet validated~~ **DONE (D1, v0.7.0):** `kmwcd` (`#MWC`,
+  `phase_flag` 0/1/2) and `wcd` (`k`) validated against real EM124/EM2040/EM122
+  data by exact byte reconciliation; fixtures committed. Remaining water-column
+  work is **products** (echograms / midwater detection), not reader validation.
 - One literal EPSG remains: the optional geometry-mask CLI default `EPSG:32610`
   (must match the user's mask file; not survey projection).
 - Archived gzip'd `.all` exist in the corpus — gunzip first.
 
 ## Remaining — Capability D (backlog, demand-driven)
-- **D1 (recommended first):** validate `.wcd`/`.kmwcd` water-column readers against
-  real fixtures (TN447 `.kmwcd` in hand) → water-column products (echograms,
-  plume/midwater detection). Samoa-relevant.
+- **D1:** ✅ reader validation done (v0.7.0) — `.wcd`/`.kmwcd` validated against
+  real fixtures; first product `mbes_tools.wc_diagnostics`
+  (`mbes-wc-diagnostics`) renders echogram / geo-wedge / phase review panels.
+  Next: geo-referenced echogram **grids/mosaics** + plume/midwater detection.
+  Samoa-relevant.
 - **D2 (highest interoperability leverage):** native **GSF** reader feeding the
   same `SoundingRecord` pipeline; parity oracle = MB-System (format 121).
 - **D3:** attitude (`A`/`n`/`#SKM`) + installation (`I`/`#IIP`/`#IOP`) parsers →

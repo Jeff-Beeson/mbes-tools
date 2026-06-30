@@ -127,7 +127,55 @@ def test_iter_wcd_files_on_missing_path_raises():
         wcd.iter_wcd_files(Path("/nonexistent/path/that/does/not/exist"))
 
 
-# TODO: add fixture-based integration test once a small .wcd sample is
-# committed under tests/fixtures/. The clipper in clip_datagrams.py works
-# unchanged for .wcd (same envelope as .all) — just clip by counting K
-# datagrams instead of X pings.
+# ---------------------------------------------------------------------------
+# Fixture-based integration test against REAL k-datagram bytes (Capability D1).
+#
+# Real EM122 deep-water water column (R/V Atlantis). Clipped from
+# 0197_20130703_155651_Atlantis.wcd to three k datagrams via
+# tests/fixtures/clip_datagrams.py --target-type k -n 3. On the full source
+# file all 1407 k datagrams reconcile to the byte (predicted body == actual,
+# modulo the single Kongsberg spare byte before the footer); these three are
+# complete, unfragmented pings (counters 9901-9903).
+# ---------------------------------------------------------------------------
+
+FIXTURES = Path(__file__).parent / "fixtures"
+WCD_FIXTURE = FIXTURES / "sample_atlantis_em122.wcd"
+
+
+@pytest.mark.skipif(not WCD_FIXTURE.exists(), reason="wcd fixture not present")
+def test_real_em122_wcd():
+    """The real EM122 .wcd parses; geometry and per-beam sample arrays are sane,
+    and predicted body size matches the declared length (no byte drift)."""
+    dgms = list(wcd.iter_water_column_datagrams(WCD_FIXTURE))
+    assert len(dgms) == 3
+
+    d0 = dgms[0]
+    assert d0.num_tx_sectors == 8
+    assert d0.num_beams_this_datagram == 288
+    assert len(d0.beams) == 288
+    # EM122 is a ~12 kHz system: every sector's centre frequency is near 12 kHz.
+    assert all(10_000.0 < s.centre_frequency_hz < 14_000.0 for s in d0.tx_sectors)
+    assert 1450.0 < d0.sound_speed_m_s < 1600.0
+    # Beam pointing angles sweep monotonically across the swath.
+    angles = [b.pointing_angle_deg for b in d0.beams]
+    assert angles == sorted(angles, reverse=True)
+    # Three consecutive, complete (single-datagram) pings.
+    assert [d.counter for d in dgms] == [9901, 9902, 9903]
+    assert all(d.num_datagram == 1 and d.datagram_num == 1 for d in dgms)
+
+    # Per-beam reconciliation: K body + sectors + Σ(beam header + N samples)
+    # must exactly consume record.body up to the single trailing spare byte.
+    from mbes_tools.all import iter_datagrams
+
+    for rec in iter_datagrams(WCD_FIXTURE):
+        if rec.header.type_of_datagram != "k":
+            continue
+        body = rec.body
+        s = struct.unpack_from(K_BODY_FMT, body, 0)
+        num_tx, num_beams_this = s[4], s[6]
+        cur = wcd.K_BODY_SIZE + num_tx * wcd.K_TX_SECTOR_SIZE
+        for _ in range(num_beams_this):
+            n_samps = struct.unpack_from(K_BEAM_FMT, body, cur)[2]
+            cur += wcd.K_BEAM_SIZE + n_samps
+        # Exactly one Kongsberg spare byte remains before the footer.
+        assert len(body) - cur == 1

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mbes-tools"
-version = "0.6.0"
+version = "0.7.0"
 description = "Python tools for Kongsberg multibeam I/O, backscatter normalization, and MB-System integration"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -48,6 +48,7 @@ mbes-bs-apply = "mbes_tools.backscatter.cli:apply_main"
 mbes-bs-gui = "mbes_tools.backscatter.cli:gui_main"
 mbes-catalog = "mbes_tools.catalog:main"
 mbes-diagnostics = "mbes_tools.diagnostics:main"
+mbes-wc-diagnostics = "mbes_tools.wc_diagnostics:main"
 
 [project.urls]
 Repository = "https://github.com/Jeff-Beeson/mbes-tools"

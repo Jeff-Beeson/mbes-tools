@@ -14,10 +14,11 @@ v0, pre-release. Modules are being scaffolded and lifted from prior project work
 - `mbes_tools.beam_stat` — pluggable numpy reducers (mean/median/std/mode/trimmed-mean/percentile/min/max/range/count) that turn a beam's seabed-image samples into one backscatter value over a configurable sample window (backscatter **Source B**)
 - `mbes_tools.projection` — geography-agnostic target-CRS resolution: configurable EPSG or auto UTM-zone-from-position (hemisphere/antimeridian/polar-safe); no baked-in zone
 - `mbes_tools.diagnostics` — visual review suite (console script `mbes-diagnostics`): renders ARC/normalization, Source A-vs-B, multi-stat texture, `--si-window`, depth-mode split, port/starboard symmetry, swath-fan geometry, auto-UTM map, MBES_ARC parity, and corruption-recovery plots from real files (matplotlib lazy-imported)
+- `mbes_tools.wc_diagnostics` — water-column visual review suite (console script `mbes-wc-diagnostics`): renders amplitude echograms with the detected-bottom overlay, geo-referenced swath wedges, nadir amplitude profiles, bottom-detect/amplitude-peak alignment, `phase_flag` 1/2 phase echograms + histograms, and a sector-frequency sanity panel from real `.kmwcd`/`.wcd` files (matplotlib lazy-imported)
 
 The readers stream datagram-by-datagram and accept `on_error="skip"` to resynchronize past corrupt/truncated datagrams; `mbes-bs-table`/`-apply` default to `--on-error skip` so one bad ping or file never aborts a survey.
-- `mbes_tools.wcd` — water column data (.wcd, paired with .all)
-- `mbes_tools.kmwcd` — water column data (.kmwcd, paired with .kmall)
+- `mbes_tools.wcd` — water column data (`k` datagram in .wcd, paired with .all); validated against real EM122 data
+- `mbes_tools.kmwcd` — water column data (`#MWC` datagram in .kmwcd, paired with .kmall), including `phase_flag` 1 (int8) and 2 (int16) per-beam phase samples; validated against real EM124 and EM2040 data
 - `mbes_tools.mbsystem` — Python wrappers around MB-System CLI tools (mbinfo, mbgrid, datalist generation, format codes)
 - `mbes_tools.catalog` — inventory Kongsberg `.all`/`.kmall` files into a verification manifest (path, format, EM model, vessel, geography, depth regime, datagram types, seabed-image presence); console script `mbes-catalog`. See [docs/VERIFICATION_DATA.md](docs/VERIFICATION_DATA.md).
 - `mbes_tools.backscatter` — sector/angle backscatter normalization for **both .kmall and .all** (one pipeline):

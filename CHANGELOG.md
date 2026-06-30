@@ -4,6 +4,51 @@ All notable changes to `mbes-tools` are documented here. The project follows
 [semantic versioning](https://semver.org/) (currently 0.x — minor versions may
 add features; the public API is kept backward compatible where practical).
 
+## [0.7.0] - 2026-06-29
+
+### Added (Capability D1 — water-column reader validation)
+- **Validated `mbes_tools.kmwcd` (`#MWC`) and `mbes_tools.wcd` (`k`) against
+  real water-column data.** Both readers were previously written from spec with
+  synthetic tests only; `kmwcd` phase-sample handling (`phase_flag` 1/2) was
+  explicitly untested. They are now confirmed against real bytes by exact
+  datagram-size reconciliation (predicted size from the struct sizes + per-beam
+  block formula `numBytesPerBeamEntry + numSampleData*(1 + phaseSize)` ==
+  declared `numBytesDgm`), which pins the layout — including the `phase_flag`
+  1/2 sample element sizes — against reality:
+  - EM124 `.kmwcd` (R/V Thompson, cruise TN447, abyssal): 374/374 `#MWC`,
+    `phase_flag` 0, `dgm_version` 2 (16-byte beam entry with the
+    high-resolution detection field).
+  - EM2040 ASV `.kmall`, `phase_flag` 1 (int8, 180/128 deg): 40/40 `#MWC`;
+    real phase range ±128 ≈ ±180 deg.
+  - EM2040 ASV `.kmall`, `phase_flag` 2 (int16, 0.01 deg): 4/4 `#MWC`; real
+    phase range ±18000 ≈ ±180 deg.
+  - EM122 `.wcd` (R/V Atlantis): 1407/1407 `k` datagrams reconcile (no drift,
+    modulo the single Kongsberg spare byte before the footer); fragmented pings
+    (`num_datagram` > 1) modelled correctly.
+- **New committed fixtures** (`tests/fixtures/`): `sample_tn447_em124.kmwcd`
+  (EM124 abyssal, `phase_flag` 0), `sample_em2040_wc_phase1.kmall` (EM2040 ASV,
+  `phase_flag` 1), `sample_atlantis_em122.wcd` (EM122, 3 pings). The
+  high-resolution `phase_flag` 2 file (~2.9 MB/`#MWC`) is too large to commit;
+  its test is gated on the external file (`MBES_MWC_PHASE2_FILE`).
+- **New tests:** real-fixture integration tests for both readers, a synthetic
+  `phase_flag` 2 round-trip, and a gated real `phase_flag` 2 test.
+- **`mbes_tools.wc_diagnostics` (`mbes-wc-diagnostics`):** a reproducible
+  water-column visual review suite (the `mbes_tools.diagnostics` analogue for
+  `#MWC`/`k`). Renders, from real files, an amplitude **echogram** with the
+  per-beam detected-bottom overlay, a **geo-referenced swath wedge**
+  (across-track/depth from beam angle + range), a **nadir amplitude profile**,
+  a **bottom-detect vs amplitude-peak** alignment check, **phase echogram +
+  histogram** for `phase_flag` 1/2, and a cross-file **sector-frequency**
+  sanity panel. matplotlib is lazy (the `gui` extra); the numeric helpers
+  (`phase_scale_deg`, `padded_grid`, `wedge_coords`, `range_axis`,
+  `peak_sample_indices`) are dependency-light and unit-tested, with a render
+  test gated on matplotlib that uses the committed fixtures.
+
+### Fixed
+- `kmwcd.py`: corrected a misleading code comment that stated the RX beam header
+  was 16 bytes (v1) / 20 bytes (v2); the actual struct sizes are 12 / 16 bytes
+  (already correct in code and asserted by `test_struct_sizes`).
+
 ## [0.6.0] - 2026-06-29
 
 ### Added
