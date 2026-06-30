@@ -406,3 +406,38 @@ def test_fixture_position_records_have_valid_coords(sample_all):
         assert -90.0 <= p.latitude_deg <= 90.0
         assert -180.0 <= p.longitude_deg <= 180.0
         assert 0.0 <= p.heading_deg < 360.0
+
+
+# --- D3: A attitude (65) + I installation (73) fixture tests ----------------
+
+
+def test_fixture_attitude(sample_all):
+    """A attitude datagrams yield a sane roll/pitch/heave/heading time series."""
+    atts = list(mbes_all.iter_attitude_datagrams(sample_all))
+    assert atts
+    a = atts[0]
+    assert a.serial_number > 0
+    assert len(a.samples) > 0
+    # Entry byte reconciliation: body holds the 6-byte header + N*12 entries +
+    # at least the 1-byte sensor descriptor.
+    rec = next(r for r in mbes_all.iter_datagrams(sample_all)
+               if r.header.type_of_datagram == "A")
+    assert len(rec.body) >= 6 + len(a.samples) * 12 + 1
+    for s in a.samples:
+        assert -45.0 <= s.roll_deg <= 45.0
+        assert -45.0 <= s.pitch_deg <= 45.0
+        assert 0.0 <= s.heading_deg < 360.0
+        assert abs(s.heave_m) < 25.0  # metres, sane for a survey vessel
+
+
+def test_fixture_installation(sample_all):
+    """I installation text parses to real transducer lever arms + mount angles."""
+    insts = list(mbes_all.iter_installation_datagrams(sample_all))
+    assert insts
+    ip = insts[0].parameters
+    assert ip.waterline_m is not None
+    off = ip.transducer_offsets("S1")
+    ang = ip.mount_angles("S1")
+    assert off is not None and ang is not None
+    assert all(abs(v) < 50.0 for v in off)    # lever arms within metres
+    assert -180.0 <= ang[0] <= 180.0          # roll

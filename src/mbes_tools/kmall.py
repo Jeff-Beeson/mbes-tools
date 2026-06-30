@@ -33,7 +33,9 @@ import re
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Callable, Iterator, List, Optional
+
+from mbes_tools.install_params import InstallationParameters
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +61,43 @@ MRZ_TX_SECTOR_BASE_SIZE = struct.calcsize(MRZ_TX_SECTOR_BASE_FMT)
 MRZ_TX_SECTOR_EXTRA_V1_SIZE = struct.calcsize(MRZ_TX_SECTOR_EXTRA_V1_FMT)
 MRZ_RX_INFO_SIZE = struct.calcsize(MRZ_RX_INFO_FMT)
 MRZ_SOUNDING_SIZE = struct.calcsize(MRZ_SOUNDING_FMT)
+
+# ---------------------------------------------------------------------------
+# #SKM attitude + #IIP/#IOP parameter structure definitions.
+# ---------------------------------------------------------------------------
+
+# SKMinfo: numBytesInfoPart (u16), sensorSystem (u8), sensorStatus (u8),
+# sensorInputFormat (u16), numSamplesArray (u16), numBytesPerSample (u16),
+# sensorDataContents (u16).
+SKM_INFO_FMT = "<1H2B4H"
+SKM_INFO_SIZE = struct.calcsize(SKM_INFO_FMT)
+
+# One KMbinary sample (the leading fixed part; advance by numBytesPerSample
+# to reach the next, which includes the trailing 12-byte KMdelayedHeave):
+# dgmType (#KMB, 4s), numBytesDgm (u16), dgmVersion (u16), time_sec (u32),
+# time_nanosec (u32), status (u32), latitude_deg (f64), longitude_deg (f64),
+# then 21 float32: ellipsoidHeight, roll, pitch, heading, heave, rollRate,
+# pitchRate, yawRate, velN, velE, velD, 7 error fields, northAcc, eastAcc,
+# downAcc.
+KMBINARY_FMT = "<4s2H3I2d21f"
+KMBINARY_SIZE = struct.calcsize(KMBINARY_FMT)
+
+# #IIP / #IOP fixed body: numBytesCmnPart (u16), info (u16), status (u16),
+# then the delimited ASCII parameter string up to numBytesCmnPart.
+KMALL_PARAMS_FMT = "<3H"
+KMALL_PARAMS_SIZE = struct.calcsize(KMALL_PARAMS_FMT)
+
+# #SPO / #CPO sensor position output. Scommon cmnPart: numBytesCmnPart (u16),
+# sensorSystem (u16), sensorStatus (u16), padding (u16). Then a fixed data
+# block: timeFromSensor_sec (u32), timeFromSensor_nanosec (u32),
+# posFixQuality_m (f32), correctedLat_deg (f64), correctedLong_deg (f64),
+# speedOverGround_mPerSec (f32), courseOverGround_deg (f32),
+# ellipsoidHeightReRefPoint_m (f32), then the raw position-sensor (NMEA) string
+# up to the datagram end.
+SPO_CMN_FMT = "<4H"
+SPO_CMN_SIZE = struct.calcsize(SPO_CMN_FMT)
+SPO_DATA_FMT = "<2I1f2d3f"
+SPO_DATA_SIZE = struct.calcsize(SPO_DATA_FMT)
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +181,115 @@ class MRZDatagram:
     # when the datagram is parsed with ``parse_seabed_image=True``; otherwise
     # ``None``. The per-beam sample counts are ``MRZSounding.si_num_samples``.
     si_sample_desidb: Optional[List[int]] = None
+
+
+@dataclass
+class KMBinarySample:
+    """One KMbinary attitude sample from an #SKM datagram.
+
+    Time-stamped from inside the sensor (not corrected for installation). Angles
+    in degrees (roll/pitch/heading), heave in metres (positive down), rates in
+    deg/s, velocities and accelerations in the north/east/down frame. To use
+    these for re-georeferencing, combine with the install lever arms / mount
+    angles from :class:`mbes_tools.install_params.InstallationParameters`.
+    """
+
+    time_sec: int
+    time_nanosec: int
+    status: int
+    latitude_deg: float
+    longitude_deg: float
+    ellipsoid_height_m: float
+    roll_deg: float
+    pitch_deg: float
+    heading_deg: float
+    heave_m: float
+    roll_rate: float
+    pitch_rate: float
+    yaw_rate: float
+    vel_north: float
+    vel_east: float
+    vel_down: float
+    acc_north: float
+    acc_east: float
+    acc_down: float
+
+
+@dataclass
+class SKMDatagram:
+    """Parsed #SKM datagram — a block of KMbinary attitude/velocity samples."""
+
+    dgm_version: int
+    system_id: int
+    echo_sounder_id: int
+    time_s: int
+    time_ns: int
+    sensor_system: int
+    sensor_status: int
+    sensor_input_format: int
+    num_samples: int
+    num_bytes_per_sample: int
+    samples: List[KMBinarySample] = field(default_factory=list)
+
+
+@dataclass
+class KmallParamsDatagram:
+    """Parsed #IIP installation or #IOP runtime/operator parameters datagram.
+
+    ``parameters`` is the structured install view (lever arms, mount angles,
+    waterline, EM model, serial) for #IIP; for #IOP the text is free-form
+    operator settings, so ``parameters.params`` is best-effort and
+    ``parameters.raw`` is authoritative.
+    """
+
+    dgm_type: str  # "#IIP" or "#IOP"
+    dgm_version: int
+    system_id: int
+    echo_sounder_id: int
+    time_s: int
+    time_ns: int
+    info: int
+    status: int
+    parameters: InstallationParameters
+
+
+@dataclass
+class KmallPositionDatagram:
+    """Parsed #SPO (sensor position output) or #CPO (compatibility position).
+
+    The .kmall navigation datagram — the analogue of the .all ``P`` position
+    datagram. ``#SPO`` position is referred to the **vessel reference point**;
+    ``#CPO`` to the **antenna footprint at water level**. Both carry the active
+    position sensor's (motion-corrected, if enabled) latitude/longitude, speed
+    and course over ground, ellipsoid height, plus the **raw sensor text**
+    (typically the NMEA ``GGA`` sentence) in ``raw_position_string``.
+
+    When the sensor is inactive the numeric fields hold KMALL "unavailable"
+    sentinels outside normal ranges — check :attr:`is_available`.
+    """
+
+    dgm_type: str  # "#SPO" or "#CPO"
+    dgm_version: int
+    system_id: int
+    echo_sounder_id: int
+    time_s: int
+    time_ns: int
+    sensor_system: int
+    sensor_status: int
+    time_from_sensor_sec: int
+    time_from_sensor_nanosec: int
+    pos_fix_quality_m: float
+    latitude_deg: float
+    longitude_deg: float
+    speed_over_ground_m_s: float
+    course_over_ground_deg: float
+    ellipsoid_height_m: float
+    raw_position_string: bytes
+
+    @property
+    def is_available(self) -> bool:
+        """True when the active sensor supplied a usable position (lat/lon in range)."""
+        return -90.0 <= self.latitude_deg <= 90.0 and -180.0 <= self.longitude_deg <= 180.0
 
 
 # ---------------------------------------------------------------------------
@@ -516,3 +664,263 @@ def iter_mrz_datagrams(
                 continue
 
             offset += datagram_size
+
+
+# ---------------------------------------------------------------------------
+# #SKM attitude + #IIP/#IOP parameter parsing.
+# ---------------------------------------------------------------------------
+
+
+def parse_skm_datagram(fid, datagram_start: int, datagram_size: int) -> Optional[SKMDatagram]:
+    """Parse one #SKM datagram into an :class:`SKMDatagram`.
+
+    Each KMbinary sample is advanced by the datagram's ``numBytesPerSample`` so
+    trailing fields (e.g. the delayed-heave block, or version additions) are
+    tolerated. Leaves ``fid`` at ``datagram_start + datagram_size``. Returns
+    ``None`` if the datagram is not ``#SKM``.
+    """
+    fid.seek(datagram_start)
+    header = unpack_from_file(fid, DGM_HEADER_FMT)
+    num_bytes_dgm, dgm_type, dgm_version, system_id, echo_sounder_id, time_s, time_ns = header
+
+    if dgm_type != b"#SKM":
+        fid.seek(datagram_start + datagram_size)
+        return None
+
+    info_start = fid.tell()
+    info = unpack_from_file(fid, SKM_INFO_FMT)
+    (
+        num_bytes_info,
+        sensor_system,
+        sensor_status,
+        sensor_input_format,
+        num_samples,
+        num_bytes_per_sample,
+        _sensor_data_contents,
+    ) = info
+    fid.seek(info_start + int(num_bytes_info))
+
+    samples: List[KMBinarySample] = []
+    for _ in range(int(num_samples)):
+        sample_start = fid.tell()
+        v = struct.unpack(KMBINARY_FMT, read_exact(fid, KMBINARY_SIZE))
+        samples.append(
+            KMBinarySample(
+                time_sec=int(v[3]),
+                time_nanosec=int(v[4]),
+                status=int(v[5]),
+                latitude_deg=float(v[6]),
+                longitude_deg=float(v[7]),
+                ellipsoid_height_m=float(v[8]),
+                roll_deg=float(v[9]),
+                pitch_deg=float(v[10]),
+                heading_deg=float(v[11]),
+                heave_m=float(v[12]),
+                roll_rate=float(v[13]),
+                pitch_rate=float(v[14]),
+                yaw_rate=float(v[15]),
+                vel_north=float(v[16]),
+                vel_east=float(v[17]),
+                vel_down=float(v[18]),
+                acc_north=float(v[26]),
+                acc_east=float(v[27]),
+                acc_down=float(v[28]),
+            )
+        )
+        fid.seek(sample_start + int(num_bytes_per_sample))
+
+    fid.seek(datagram_start + datagram_size)
+    return SKMDatagram(
+        dgm_version=int(dgm_version),
+        system_id=int(system_id),
+        echo_sounder_id=int(echo_sounder_id),
+        time_s=int(time_s),
+        time_ns=int(time_ns),
+        sensor_system=int(sensor_system),
+        sensor_status=int(sensor_status),
+        sensor_input_format=int(sensor_input_format),
+        num_samples=int(num_samples),
+        num_bytes_per_sample=int(num_bytes_per_sample),
+        samples=samples,
+    )
+
+
+def parse_kmall_params_datagram(
+    fid, datagram_start: int, datagram_size: int
+) -> Optional[KmallParamsDatagram]:
+    """Parse one #IIP (installation) or #IOP (runtime) parameters datagram.
+
+    Both carry ``numBytesCmnPart, info, status`` then a delimited ASCII
+    parameter string. Returns ``None`` for other types.
+    """
+    fid.seek(datagram_start)
+    header = unpack_from_file(fid, DGM_HEADER_FMT)
+    num_bytes_dgm, dgm_type, dgm_version, system_id, echo_sounder_id, time_s, time_ns = header
+
+    if dgm_type not in (b"#IIP", b"#IOP"):
+        fid.seek(datagram_start + datagram_size)
+        return None
+
+    num_bytes_cmn, info, status = unpack_from_file(fid, KMALL_PARAMS_FMT)
+    text_len = int(num_bytes_cmn) - KMALL_PARAMS_SIZE
+    text_bytes = read_exact(fid, text_len) if text_len > 0 else b""
+    text = text_bytes.split(b"\x00", 1)[0].decode("utf-8", errors="replace")
+
+    fid.seek(datagram_start + datagram_size)
+    return KmallParamsDatagram(
+        dgm_type=dgm_type.decode("ascii"),
+        dgm_version=int(dgm_version),
+        system_id=int(system_id),
+        echo_sounder_id=int(echo_sounder_id),
+        time_s=int(time_s),
+        time_ns=int(time_ns),
+        info=int(info),
+        status=int(status),
+        parameters=InstallationParameters.from_text(text),
+    )
+
+
+def _iter_typed_datagrams(
+    path: Path,
+    type_bytes: bytes,
+    parse_fn: Callable,
+    on_error: str = "raise",
+    error_log: Optional[list] = None,
+) -> Iterator:
+    """Walk a .kmall file and yield the parsed datagrams of one type.
+
+    Mirrors :func:`iter_mrz_datagrams`' envelope walk and ``on_error`` resync,
+    so one corrupt region never aborts the file.
+    """
+    file_size = path.stat().st_size
+    with path.open("rb") as fid:
+        offset = 0
+        while offset < file_size:
+            fid.seek(offset)
+            header8 = fid.read(8)
+            if len(header8) < 8:
+                break
+            datagram_size, datagram_type = struct.unpack("<I4s", header8)
+
+            problem: Optional[str] = None
+            if datagram_size < 8 or offset + datagram_size > file_size:
+                problem = f"invalid datagram length {datagram_size}"
+
+            if problem is None and datagram_type == type_bytes:
+                try:
+                    dgm = parse_fn(fid, offset, datagram_size)
+                except (struct.error, EOFError, ValueError) as exc:
+                    problem = f"{type_bytes.decode()} parse failed: {type(exc).__name__}: {exc}"
+                    dgm = None
+                if dgm is not None:
+                    yield dgm
+
+            if problem is not None:
+                msg = f"{problem} at byte offset {offset} in {path}"
+                if on_error != "skip":
+                    raise RuntimeError(msg)
+                if error_log is not None:
+                    error_log.append((offset, msg))
+                nxt = _resync_kmall(fid, file_size, offset)
+                if nxt is None or nxt <= offset:
+                    break
+                offset = nxt
+                continue
+
+            offset += datagram_size
+
+
+def iter_skm_datagrams(
+    path: Path, on_error: str = "raise", error_log: Optional[list] = None
+) -> Iterator[SKMDatagram]:
+    """Walk a .kmall file and yield each parsed #SKM attitude datagram."""
+    yield from _iter_typed_datagrams(path, b"#SKM", parse_skm_datagram, on_error, error_log)
+
+
+def iter_iip_datagrams(
+    path: Path, on_error: str = "raise", error_log: Optional[list] = None
+) -> Iterator[KmallParamsDatagram]:
+    """Walk a .kmall file and yield each parsed #IIP installation datagram."""
+    yield from _iter_typed_datagrams(path, b"#IIP", parse_kmall_params_datagram, on_error, error_log)
+
+
+def iter_iop_datagrams(
+    path: Path, on_error: str = "raise", error_log: Optional[list] = None
+) -> Iterator[KmallParamsDatagram]:
+    """Walk a .kmall file and yield each parsed #IOP runtime datagram."""
+    yield from _iter_typed_datagrams(path, b"#IOP", parse_kmall_params_datagram, on_error, error_log)
+
+
+def parse_position_datagram(
+    fid, datagram_start: int, datagram_size: int
+) -> Optional[KmallPositionDatagram]:
+    """Parse one #SPO or #CPO position datagram into a :class:`KmallPositionDatagram`.
+
+    Both share the same layout (Scommon cmnPart + fixed data block + raw sensor
+    text). Returns ``None`` for other types.
+    """
+    fid.seek(datagram_start)
+    header = unpack_from_file(fid, DGM_HEADER_FMT)
+    num_bytes_dgm, dgm_type, dgm_version, system_id, echo_sounder_id, time_s, time_ns = header
+
+    if dgm_type not in (b"#SPO", b"#CPO"):
+        fid.seek(datagram_start + datagram_size)
+        return None
+
+    cmn_start = fid.tell()
+    num_bytes_cmn, sensor_system, sensor_status, _padding = unpack_from_file(fid, SPO_CMN_FMT)
+    fid.seek(cmn_start + int(num_bytes_cmn))
+
+    (
+        time_from_sensor_sec,
+        time_from_sensor_nanosec,
+        pos_fix_quality_m,
+        latitude_deg,
+        longitude_deg,
+        speed_over_ground,
+        course_over_ground,
+        ellipsoid_height_m,
+    ) = unpack_from_file(fid, SPO_DATA_FMT)
+
+    # The raw position-sensor string fills the rest of the datagram, before the
+    # trailing 4-byte length repeat. Trim to the end of the NMEA sentence.
+    text_len = (datagram_start + datagram_size - 4) - fid.tell()
+    raw = read_exact(fid, text_len) if text_len > 0 else b""
+    raw = raw.split(b"\r\n", 1)[0]
+
+    fid.seek(datagram_start + datagram_size)
+    return KmallPositionDatagram(
+        dgm_type=dgm_type.decode("ascii"),
+        dgm_version=int(dgm_version),
+        system_id=int(system_id),
+        echo_sounder_id=int(echo_sounder_id),
+        time_s=int(time_s),
+        time_ns=int(time_ns),
+        sensor_system=int(sensor_system),
+        sensor_status=int(sensor_status),
+        time_from_sensor_sec=int(time_from_sensor_sec),
+        time_from_sensor_nanosec=int(time_from_sensor_nanosec),
+        pos_fix_quality_m=float(pos_fix_quality_m),
+        latitude_deg=float(latitude_deg),
+        longitude_deg=float(longitude_deg),
+        speed_over_ground_m_s=float(speed_over_ground),
+        course_over_ground_deg=float(course_over_ground),
+        ellipsoid_height_m=float(ellipsoid_height_m),
+        raw_position_string=raw,
+    )
+
+
+def iter_spo_datagrams(
+    path: Path, on_error: str = "raise", error_log: Optional[list] = None
+) -> Iterator[KmallPositionDatagram]:
+    """Walk a .kmall file and yield each parsed #SPO sensor position datagram
+    (position referred to the vessel reference point)."""
+    yield from _iter_typed_datagrams(path, b"#SPO", parse_position_datagram, on_error, error_log)
+
+
+def iter_cpo_datagrams(
+    path: Path, on_error: str = "raise", error_log: Optional[list] = None
+) -> Iterator[KmallPositionDatagram]:
+    """Walk a .kmall file and yield each parsed #CPO compatibility position
+    datagram (position referred to the antenna footprint at water level)."""
+    yield from _iter_typed_datagrams(path, b"#CPO", parse_position_datagram, on_error, error_log)

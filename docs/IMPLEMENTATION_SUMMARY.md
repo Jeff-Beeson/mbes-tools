@@ -8,9 +8,10 @@ for the test corpus see `docs/VERIFICATION_DATA.md`; for mode maps see
 
 **Status:** UPGRADE_PLAN Capabilities **A, B, C done & on `main`** (v0.6.0);
 **D1 water-column reader validation done** (v0.7.0, branch
-`capability-d1/water-column-validation`); **D2/D3** = backlog; **Samoa
-acceptance** pending data download.
-**Tests:** `python -m pytest -q` → 142 passed, 2 skipped (2 gated on
+`capability-d1/water-column-validation`); **D3 attitude/installation parsers
+done** (v0.8.0, branch `capability-d3/attitude-installation`, stacked on D1);
+**D2** = backlog; **Samoa acceptance** pending data download.
+**Tests:** `python -m pytest -q` → 153 passed, 2 skipped (2 gated on
 `MBES_TEST_DATA_ROOT` + matplotlib; a 3rd water-column test runs when the large
 external `phase_flag`-2 file is present).
 **Dependency contract:** core paths are **numpy + stdlib only**; scipy / pandas /
@@ -104,7 +105,9 @@ pyproj / matplotlib are lazy-imported optional extras. `samoa_cm_tools` imports
 - **Modules added:** `mbes_tools.catalog`, `.depth_modes`, `.beam_stat`,
   `.projection`, `.diagnostics`, `.backscatter.all_table`; **D1:**
   `.wc_diagnostics` (water-column review suite; `.kmwcd`/`.wcd` readers
-  validated).
+  validated); **D3:** `.install_params` (structured install/runtime text) +
+  attitude/installation parsers in `.all` (`A`/`I`) and `.kmall`
+  (`#SKM`/`#IIP`/`#IOP`).
 - **Console scripts:** `mbes-bs-table`, `mbes-bs-apply` (both `--format`-dispatched),
   `mbes-bs-gui`, `mbes-catalog`, `mbes-diagnostics`, `mbes-wc-diagnostics`.
 - **New table/apply flags:** `--format`, `--reflectivity-source`, `--bs-source`,
@@ -149,8 +152,12 @@ water-column clips `sample_tn447_em124.kmwcd` (EM124 `#MWC`, `phase_flag` 0),
   (`mbes-wc-diagnostics`) renders echogram / geo-wedge / phase review panels.
   Next: geo-referenced echogram **grids/mosaics** + plume/midwater detection.
   Samoa-relevant.
+- **D3:** ✅ parsers done (v0.8.0) — attitude (`.all` `A`, `.kmall` `#SKM`) +
+  installation/runtime (`.all` `I`, `.kmall` `#IIP`/`#IOP`) + navigation
+  (`.all` `P` already; `.kmall` `#SPO`/`#CPO` position sensor output) +
+  `install_params` (lever arms, mount angles, waterline, model, serial). Next:
+  **consumers** —
+  precise re-georeferencing, grazing-angle ARC refinement, AUV motion
+  correction, manifest provenance. Not yet: `.all` `n` (110) network attitude.
 - **D2 (highest interoperability leverage):** native **GSF** reader feeding the
   same `SoundingRecord` pipeline; parity oracle = MB-System (format 121).
-- **D3:** attitude (`A`/`n`/`#SKM`) + installation (`I`/`#IIP`/`#IOP`) parsers →
-  precise re-georeferencing, grazing-angle ARC refinement, AUV motion correction,
-  provenance.

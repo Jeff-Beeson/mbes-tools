@@ -37,6 +37,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator, List, Optional, Tuple
 
+from mbes_tools.install_params import InstallationParameters
+
 
 # ---------------------------------------------------------------------------
 # Datagram type codes (single ASCII characters).
@@ -47,6 +49,8 @@ DGM_TYPE_DEPTH = b"X"
 DGM_TYPE_SEABED_IMAGE = b"Y"
 DGM_TYPE_RAW_RANGE_ANGLE = b"N"  # datagram 78: raw range and angle
 DGM_TYPE_RUNTIME = b"R"          # datagram 82: runtime parameters
+DGM_TYPE_ATTITUDE = b"A"         # datagram 65: attitude
+DGM_TYPE_INSTALLATION = b"I"     # datagram 73: installation parameters (start)
 
 # Constants from the Kongsberg envelope.
 STX = 0x02
@@ -132,6 +136,24 @@ N_RX_SIZE = struct.calcsize(N_RX_FMT)
 # maxStbdSwathWidth (u16), txAlongTilt*10 (i16), filterIdentifier2 (u8).
 R_BODY_FMT = "<HHBBBBBBHHHHHbBBBBBHBBBBHhB"
 R_BODY_SIZE = struct.calcsize(R_BODY_FMT)
+
+# A attitude datagram (65). Body: counter (u16), serialNumber (u16),
+# numEntries (u16), then numEntries attitude records, then a trailing
+# sensorSystemDescriptor (u8) before the footer.
+A_BODY_FMT = "<HHH"
+A_BODY_SIZE = struct.calcsize(A_BODY_FMT)
+
+# A per-entry attitude record:
+# recordTime (u16, ms since datagram time), sensorStatus (u16),
+# roll*100 (i16), pitch*100 (i16), heave (i16, cm), heading*100 (u16).
+A_ENTRY_FMT = "<HHhhhH"
+A_ENTRY_SIZE = struct.calcsize(A_ENTRY_FMT)
+
+# I installation datagram (73). Body: surveyLineNumber/counter (u16),
+# systemSerialNumber (u16), secondarySystemSerialNumber (u16), then a delimited
+# ASCII installation-parameter string (KEY=VALUE,...) up to the footer.
+I_BODY_FMT = "<HHH"
+I_BODY_SIZE = struct.calcsize(I_BODY_FMT)
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +329,51 @@ class RawRangeAngleDatagram:
     num_valid_detections: int
     sample_frequency_hz: float
     beams: List[RawRangeAngleBeam] = field(default_factory=list)
+
+
+@dataclass
+class AttitudeSample:
+    """One attitude record in an ``A`` attitude (65) datagram.
+
+    ``time_ms`` is milliseconds since the datagram header time. Angles are in
+    degrees (positive roll = port up; positive pitch = bow up; heading is true,
+    0–360). ``heave_m`` is positive down.
+    """
+
+    time_ms: int
+    sensor_status: int
+    roll_deg: float
+    pitch_deg: float
+    heave_m: float
+    heading_deg: float
+
+
+@dataclass
+class AttitudeDatagram:
+    """Parsed ``A`` attitude (65) datagram — a short time series of
+    roll/pitch/heave/heading samples between sounding datagrams."""
+
+    header: DatagramHeader
+    counter: int
+    serial_number: int
+    sensor_system_descriptor: int
+    samples: List[AttitudeSample] = field(default_factory=list)
+
+
+@dataclass
+class InstallationDatagram:
+    """Parsed ``I`` installation parameters (73) datagram.
+
+    ``parameters`` is a structured view of the install text (transducer lever
+    arms, mount angles, waterline, serials) — see
+    :class:`mbes_tools.install_params.InstallationParameters`.
+    """
+
+    header: DatagramHeader
+    counter: int
+    serial_number: int
+    secondary_serial_number: int
+    parameters: InstallationParameters
 
 
 @dataclass
@@ -767,6 +834,73 @@ def parse_raw_range_angle(record: DatagramRecord) -> RawRangeAngleDatagram:
     )
 
 
+def parse_attitude(record: DatagramRecord) -> AttitudeDatagram:
+    """Decode the body of an ``A`` attitude (65) datagram.
+
+    Yields the per-entry roll/pitch/heave/heading time series and the trailing
+    sensor-system descriptor. ``recordTime`` is kept in milliseconds relative to
+    the datagram time; absolute times are ``header.time_seconds + time_ms/1000``.
+    """
+    if record.header.type_of_datagram != "A":
+        raise ValueError(
+            f"parse_attitude expects type 'A', got {record.header.type_of_datagram!r}"
+        )
+
+    counter, serial_number, num_entries = _unpack(A_BODY_FMT, record.body, 0)
+
+    samples: List[AttitudeSample] = []
+    cursor = A_BODY_SIZE
+    for _ in range(num_entries):
+        t_ms, sensor_status, roll_raw, pitch_raw, heave_cm, heading_raw = _unpack(
+            A_ENTRY_FMT, record.body, cursor
+        )
+        samples.append(
+            AttitudeSample(
+                time_ms=int(t_ms),
+                sensor_status=int(sensor_status),
+                roll_deg=roll_raw / 100.0,
+                pitch_deg=pitch_raw / 100.0,
+                heave_m=heave_cm / 100.0,
+                heading_deg=heading_raw / 100.0,
+            )
+        )
+        cursor += A_ENTRY_SIZE
+
+    # The sensor-system descriptor byte follows the entry array.
+    descriptor = record.body[cursor] if cursor < len(record.body) else 0
+
+    return AttitudeDatagram(
+        header=record.header,
+        counter=int(counter),
+        serial_number=int(serial_number),
+        sensor_system_descriptor=int(descriptor),
+        samples=samples,
+    )
+
+
+def parse_installation(record: DatagramRecord) -> InstallationDatagram:
+    """Decode the body of an ``I`` installation parameters (73) datagram.
+
+    The fixed three uint16 fields are followed by the delimited ASCII
+    installation string, parsed into :class:`InstallationParameters`.
+    """
+    if record.header.type_of_datagram != "I":
+        raise ValueError(
+            f"parse_installation expects type 'I', got {record.header.type_of_datagram!r}"
+        )
+
+    counter, serial_number, secondary_serial = _unpack(I_BODY_FMT, record.body, 0)
+    text = record.body[I_BODY_SIZE:].split(b"\x00", 1)[0].decode("ascii", errors="replace")
+
+    return InstallationDatagram(
+        header=record.header,
+        counter=int(counter),
+        serial_number=int(serial_number),
+        secondary_serial_number=int(secondary_serial),
+        parameters=InstallationParameters.from_text(text),
+    )
+
+
 def parse_runtime(record: DatagramRecord) -> RuntimeDatagram:
     """Decode the body of an ``R`` runtime parameters (82) datagram."""
     if record.header.type_of_datagram != "R":
@@ -827,3 +961,17 @@ def iter_runtime_datagrams(path: Path) -> Iterator[RuntimeDatagram]:
     for rec in iter_datagrams(path):
         if rec.header.type_of_datagram == "R":
             yield parse_runtime(rec)
+
+
+def iter_attitude_datagrams(path: Path) -> Iterator[AttitudeDatagram]:
+    """Walk a .all file and yield each parsed ``A`` attitude (65) datagram."""
+    for rec in iter_datagrams(path):
+        if rec.header.type_of_datagram == "A":
+            yield parse_attitude(rec)
+
+
+def iter_installation_datagrams(path: Path) -> Iterator[InstallationDatagram]:
+    """Walk a .all file and yield each parsed ``I`` installation (73) datagram."""
+    for rec in iter_datagrams(path):
+        if rec.header.type_of_datagram == "I":
+            yield parse_installation(rec)

@@ -4,8 +4,9 @@
 `docs/UPGRADE_PLAN.md` work. Capabilities **A, B, C** of the plan are
 implemented, verified against real data, and **merged to `main`** (v0.6.0).
 **D1** (water-column reader validation, v0.7.0) is on branch
-`capability-d1/water-column-validation`; **D2/D3** are the backlog described
-below.
+`capability-d1/water-column-validation`; **D3** (attitude/installation parsers,
+v0.8.0) is stacked on D1 on branch `capability-d3/attitude-installation`; **D2**
+is the backlog described below.
 
 > Read this together with `docs/UPGRADE_PLAN.md` (the spec),
 > `docs/VERIFICATION_DATA.md` (the real-data corpus + how to regenerate the
@@ -104,8 +105,8 @@ a `CHANGELOG.md` entry per capability.
 ---
 
 ## 3. Build / test status
-- **`python -m pytest -q` → 142 passed, 2 skipped** at the tip of
-  `capability-d1/water-column-validation` (131/2 on merged `main`).
+- **`python -m pytest -q` → 153 passed, 2 skipped** at the tip of
+  `capability-d3/attitude-installation` (142/2 at D1, 131/2 on merged `main`).
 - The 2 skips are the gated cross-model test and the gated diagnostics render
   test; run them with `MBES_TEST_DATA_ROOT=<dir>` (+ matplotlib for the render).
   The gated real `phase_flag`-2 water-column test runs when its (large, external)
@@ -215,25 +216,38 @@ additive. Recommended order and concrete first steps below.
 - **Why / trigger:** many surveys/archives ship only GSF; needed to compare
   against CARIS/Qimera products and to support "other geographies/instruments".
 
-### D3: attitude / installation parsers
+### D3: attitude / installation parsers — **PARSERS DONE (v0.8.0)**
 - **Goal:** native parsers for attitude (`.all` `A`/`n`; `.kmall` `#SKM`) and
   installation (`.all` `I` + the already-parsed `R`; `.kmall` `#IIP`/`#IOP`).
-- **First steps:**
-  1. Add dataclasses + parsers alongside the existing `P/X/Y/N/R` (and #MRZ)
-     parsers; expose `iter_*` helpers.
-  2. Structure `#IIP`/`I` install text (lever arms, mount angles, serials, SVP
-     source) — supersedes the catalog's regex EM-model scrape.
-  3. Consumers (later): precise re-georeferencing + grazing-angle ARC refinement
-     (with `projection`), AUV motion correction, provenance in the manifest.
+- **Done (branch `capability-d3/attitude-installation`, stacked on D1):**
+  1. ✅ Parsers + dataclasses + `iter_*` helpers alongside the existing
+     `P/X/Y/N/R`/#MRZ parsers: `.all` `A` attitude (65) + `I` installation (73);
+     `.kmall` `#SKM` attitude (KMbinary samples) + `#IIP`/`#IOP` + `#SPO`/`#CPO`
+     navigation (position sensor output — the `.kmall` analogue of `.all` `P`,
+     with lat/lon/SOG/COG/ellipsoid height + raw NMEA). All share the
+     `on_error="skip"` resync.
+  2. ✅ `mbes_tools.install_params` structures the install/runtime text — lever
+     arms (X/Y/Z), mount angles (R/P/H), waterline, EM model, serial — across
+     **both** the `.all` flat (`S{n}`) and `.kmall #IIP` nested
+     (`TRAI_TX1`/`TRAI_RX1`, `EMXI:SWLZ`) schemes. Supersedes the catalog's regex
+     EM-model scrape (catalog not yet rewired — a cheap follow-up).
+  3. ⏭️ **Consumers (next):** precise re-georeferencing + grazing-angle ARC
+     refinement (with `projection`), AUV (Samoa EM2040) motion correction using
+     `#SKM`/`A` + install lever arms, provenance in the manifest. Geo-referenced
+     water-column mosaics (D1 next-product) depend on this attitude+install path.
+- **Validated:** byte reconciliation + field sanity on committed fixtures
+  (EM124 `#SKM`/`#IIP`/`#IOP`, EM302 `.all` `A`/`I`) — no new fixtures needed.
+- **Not yet:** `.all` `n` network attitude (110, variable-length raw-input
+  variant); `A` (65) covers attitude. Catalog rewire to `install_params`.
 - **Why / trigger:** re-georeferencing, ray-bending/grazing-angle ARC, AUV
   (Samoa EM2040) motion correction, multi-sensor fusion, GSF export.
 
 ### Suggested sequencing
 1. ✅ **D1 water-column reader validation** (done, v0.7.0) → water-column
    **products** next (echograms / midwater detection).
-2. **D2 GSF** (broadest interoperability payoff).
-3. **D3 attitude/installation** (enables precise re-georeferencing; pulls in
-   when ARC refinement or GSF export needs it).
+2. ✅ **D3 attitude/installation parsers** (done, v0.8.0) → consumers next
+   (re-georeferencing, AUV motion correction, grazing-angle ARC refinement).
+3. **D2 GSF** (broadest interoperability payoff).
 
 ### Next-session checklist
 - [ ] Confirm PR stack #1→#4 still open / merge state; rebase if any merged.

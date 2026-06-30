@@ -203,3 +203,101 @@ def test_em124_fixture_parses_with_seabed_image(sample_em124_kmall):
         assert max(s.z_m for s in valid) > 3000
         # Seabed-image samples are present for backscatter work.
         assert dgm.si_sample_desidb
+
+
+# ---------------------------------------------------------------------------
+# D3: #SKM attitude + #IIP/#IOP installation/runtime fixture tests.
+# ---------------------------------------------------------------------------
+
+
+def test_em124_skm_attitude(sample_em124_kmall):
+    """#SKM datagrams decode to a sane KMbinary attitude/velocity time series,
+    and the datagram byte-reconciles (info + numSamples*perSample)."""
+    import struct
+    from mbes_tools.kmall import DGM_HEADER_FMT, SKM_INFO_FMT, SKM_INFO_SIZE
+
+    skms = list(kmall.iter_skm_datagrams(sample_em124_kmall))
+    assert skms
+    skm = skms[0]
+    assert skm.echo_sounder_id == 124
+    assert skm.num_samples == len(skm.samples) > 0
+    assert skm.num_bytes_per_sample >= 120  # KMbinary (120) + delayed heave
+    for s in skm.samples:
+        assert -45.0 <= s.roll_deg <= 45.0
+        assert -45.0 <= s.pitch_deg <= 45.0
+        assert 0.0 <= s.heading_deg < 360.0
+        assert -90.0 <= s.latitude_deg <= 90.0
+        assert -180.0 <= s.longitude_deg <= 180.0
+
+    # Byte reconciliation against the declared datagram size: header(20) +
+    # numBytesInfoPart + numSamples*numBytesPerSample + trailing length(4).
+    with sample_em124_kmall.open("rb") as fid:
+        off = 0
+        size = sample_em124_kmall.stat().st_size
+        while off < size:
+            fid.seek(off)
+            n, t = struct.unpack("<I4s", fid.read(8))
+            if t == b"#SKM":
+                fid.seek(off)
+                num_bytes_dgm = struct.unpack(DGM_HEADER_FMT, fid.read(struct.calcsize(DGM_HEADER_FMT)))[0]
+                num_bytes_info = struct.unpack(SKM_INFO_FMT, fid.read(SKM_INFO_SIZE))[0]
+                predicted = 20 + num_bytes_info + skm.num_samples * skm.num_bytes_per_sample + 4
+                assert predicted == num_bytes_dgm
+                break
+            off += n
+
+
+def test_em124_iip_installation(sample_em124_kmall):
+    """#IIP yields EM model, serial, waterline, and TX/RX transducer geometry."""
+    iips = list(kmall.iter_iip_datagrams(sample_em124_kmall))
+    assert iips
+    ip = iips[0].parameters
+    assert ip.em_model == "EM124"
+    assert ip.serial_number  # non-empty
+    assert ip.waterline_m is not None
+    tx = ip.transducer_offsets("TRAI_TX1")
+    rx = ip.transducer_offsets("TRAI_RX1")
+    assert tx is not None and rx is not None
+    assert all(abs(v) < 50.0 for v in tx)
+    assert ip.mount_angles("TRAI_TX1") is not None
+
+
+def test_em124_iop_runtime(sample_em124_kmall):
+    """#IOP runtime datagram parses and carries the operator settings text."""
+    iops = list(kmall.iter_iop_datagrams(sample_em124_kmall))
+    assert iops
+    assert iops[0].dgm_type == "#IOP"
+    assert len(iops[0].parameters.raw) > 0
+
+
+def test_em124_spo_cpo_position(sample_em124_kmall):
+    """#SPO/#CPO navigation decodes to in-range lat/lon + SOG/COG and carries the
+    raw NMEA; the decoded position matches the embedded GGA sentence."""
+
+    def gga_lat_lon(raw: bytes):
+        # $..GGA,utc,ddmm.mmmm,N,dddmm.mmmm,E,...  -> decimal degrees
+        f = raw.decode("ascii", "replace").split(",")
+        lat = float(f[2][:2]) + float(f[2][2:]) / 60.0
+        if f[3] == "S":
+            lat = -lat
+        lon = float(f[4][:3]) + float(f[4][3:]) / 60.0
+        if f[5] == "W":
+            lon = -lon
+        return lat, lon
+
+    for it in (kmall.iter_spo_datagrams, kmall.iter_cpo_datagrams):
+        dgms = list(it(sample_em124_kmall))
+        assert dgms
+        d = dgms[0]
+        assert d.dgm_type in ("#SPO", "#CPO")
+        assert d.is_available
+        assert -90.0 <= d.latitude_deg <= 90.0
+        assert -180.0 <= d.longitude_deg <= 180.0
+        assert 0.0 <= d.speed_over_ground_m_s < 20.0
+        assert 0.0 <= d.course_over_ground_deg < 360.0
+        assert d.raw_position_string.startswith(b"$")  # NMEA sentence
+        # Decoded binary position matches the embedded GGA (within motion/lever
+        # correction, which is metres -> well under 0.001 deg).
+        glat, glon = gga_lat_lon(d.raw_position_string)
+        assert abs(glat - d.latitude_deg) < 1e-3
+        assert abs(glon - d.longitude_deg) < 1e-3
