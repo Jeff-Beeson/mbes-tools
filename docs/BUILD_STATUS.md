@@ -9,7 +9,8 @@ below.
 
 > Read this together with `docs/UPGRADE_PLAN.md` (the spec),
 > `docs/VERIFICATION_DATA.md` (the real-data corpus + how to regenerate the
-> manifest), and `docs/DEPTH_MODES.md` (the depth/ping-mode maps).
+> manifest), `docs/DEPTH_MODES.md` (the depth/ping-mode maps), and
+> `docs/WATER_COLUMN_HANDOFF.md` (the D1 water-column design/planning handoff).
 
 ---
 
