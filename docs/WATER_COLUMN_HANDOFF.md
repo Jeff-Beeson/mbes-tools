@@ -6,8 +6,12 @@ the next phase. For the full per-capability status see `docs/BUILD_STATUS.md`
 (canonical), the API view in `docs/IMPLEMENTATION_SUMMARY.md`, the spec in
 `docs/UPGRADE_PLAN.md`, and the real-data corpus in `docs/VERIFICATION_DATA.md`.
 
-**As of:** 2026-06-29 · **Version:** 0.7.0 · **PR:** #8
-(`capability-d1/water-column-validation` → `main`). `pytest -q` = 142 passed, 2 skipped.
+**As of:** 2026-06-30 · **Version:** 0.8.0 · **`main`** tip `5137d2c`.
+`pytest -q` = 153 passed, 2 skipped. D1 (water-column readers + `wc_diagnostics`,
+PR #8) **and** D3 (attitude/installation/navigation parsers + `install_params`,
+PR #9) are now **merged to `main`** — so the position/attitude/install path
+that true geo-referenced products need is available. **Next up: D1 products**
+(see "D1 products — start here" below).
 
 ## What D1 delivered
 
@@ -113,7 +117,47 @@ the next phase. For the full per-capability status see `docs/BUILD_STATUS.md`
 ## Open questions for design
 
 - Vessel-frame echogram product first (no new deps), or straight to geo-mosaic
-  (requires D3 attitude/position)?
+  (now unblocked — D3 attitude/nav/install is merged)?
 - Plume detection: rule-based TVG-residual first, or hold for a labeled dataset?
 - Pooled (sample-count-weighted) vs per-beam aggregation for water column, mirroring
   the documented backscatter ARC weighting difference?
+
+## D1 products — start here (next session)
+
+Reader validation is done; this is the **products** capability (its own
+branch/PR off `main`, version → 0.9.0). The attitude/nav/install path it needs
+landed in D3, so nothing is blocked. Recommended sequencing — cheapest, most
+demonstrable first:
+
+**Slice 1 (no new deps): vessel-frame water-column product + diagnostics.**
+- New module e.g. `mbes_tools.water_column` (or extend `wc_diagnostics`): turn a
+  parsed `#MWC`/`k` ping into an `(across_track_m, depth_m)` amplitude grid, and
+  reassemble fragmented `.wcd` pings by `counter` first. The geometry already
+  exists and is unit-tested: reuse `wc_diagnostics.wedge_coords` /
+  `range_axis` / `padded_grid` / `WCFrame` (`frame_from_mwc`, `frame_from_wcd`).
+- A first **midwater/plume anomaly** pass: TVG-residual (subtract a per-range
+  background / nadir reference) and flag coherent off-bottom returns above
+  `detected_range`. Keep core numpy+stdlib; matplotlib lazy.
+- **Verify** against committed fixtures (`sample_tn447_em124.kmwcd` EM124,
+  `sample_atlantis_em122.wcd` EM122, `sample_em2040_wc_phase1.kmall`) and state
+  what was used. The review plots in `~/mbes_review_plots/d1` are the visual
+  oracle.
+
+**Slice 2 (true georeferencing, uses D3): geo-referenced echogram grid / mosaic.**
+- Compose the vessel-frame wedge with per-sample **position + heading + attitude
+  + install lever arms** to put returns at real `(lon, lat, depth)`, then bin
+  with `mbes_tools.projection` (auto-UTM; Samoa → EPSG:32702 / 2S). The D3 API to
+  use: `kmall.iter_spo_datagrams`/`iter_cpo_datagrams` (or `iter_skm_datagrams`
+  for high-rate pos+attitude) and `all.iter_position_datagrams`/
+  `iter_attitude_datagrams`; install geometry via
+  `install_params.InstallationParameters.transducer_offsets()/mount_angles()`
+  from `iter_iip_datagrams` / `iter_installation_datagrams`. Interpolate
+  attitude/position to each ping time.
+- This is the Samoa-relevant deliverable (plume mapping, midwater context).
+
+**Watch-outs (already documented above):** per-ping `sample_freq_Hz` (deep-CW
+decimation), `.wcd` ping reassembly by `counter`, dual-swath `#MWC` fans,
+`detected_range == 0` at swath edges, beam-angle **positive = port**.
+
+**Resume command:** `git checkout main && git pull && python -m pytest -q`
+(expect 153/2), then branch `capability-d1-products/<slice>` off `main`.

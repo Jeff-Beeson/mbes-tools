@@ -1,12 +1,14 @@
 # mbes-tools — build status & continuation notes
 
-**Snapshot:** 2026-06-29. This is the handoff/status doc for the
-`docs/UPGRADE_PLAN.md` work. Capabilities **A, B, C** of the plan are
-implemented, verified against real data, and **merged to `main`** (v0.6.0).
-**D1** (water-column reader validation, v0.7.0) is on branch
-`capability-d1/water-column-validation`; **D3** (attitude/installation parsers,
-v0.8.0) is stacked on D1 on branch `capability-d3/attitude-installation`; **D2**
-is the backlog described below.
+**Snapshot:** 2026-06-30. This is the handoff/status doc for the
+`docs/UPGRADE_PLAN.md` work. Capabilities **A, B, C** (v0.6.0), **D1**
+(water-column reader validation + `wc_diagnostics`, v0.7.0), and **D3**
+(attitude/installation/navigation parsers + `install_params`, v0.8.0) are all
+implemented, verified against real data, and **merged to `main`** (tip
+`5137d2c`, **153 passed / 2 skipped**). **Next: D1 products** (water-column
+echograms / geo-mosaics / plume detection — kickoff plan in
+`docs/WATER_COLUMN_HANDOFF.md` → "D1 products — start here"). **D2** (GSF) and
+small follow-ups are the remaining backlog below.
 
 > Read this together with `docs/UPGRADE_PLAN.md` (the spec),
 > `docs/VERIFICATION_DATA.md` (the real-data corpus + how to regenerate the
@@ -28,6 +30,8 @@ commits; all feature branches deleted). For history, `git log --oneline --merges
 | #4 | C | projection/auto-UTM, tolerant readers, depth-mode consolidation |
 | #6 | diagnostics | `mbes_tools.diagnostics` visual review suite (`mbes-diagnostics`) |
 | #5 | docs | this document |
+| #8 | D1 | water-column reader validation (`#MWC`/`k`) + `wc_diagnostics` (v0.7.0) |
+| #9 | D3 | attitude/install/nav parsers (`.all` `A`/`I`; `.kmall` `#SKM`/`#IIP`/`#IOP`/`#SPO`/`#CPO`) + `install_params` (v0.8.0); stacked on #8 |
 
 > Note for future stacked-PR merges: deleting a PR's *base* branch auto-**closes**
 > the child PR (GitHub does not retarget on base-deletion). Retarget children to
@@ -39,7 +43,7 @@ commits; all feature branches deleted). For history, `git log --oneline --merges
 ```bash
 cd ~/code/mbes-tools
 git checkout main && git pull
-python -m pytest -q                                # expect 131 passed, 2 skipped
+python -m pytest -q                                # expect 153 passed, 2 skipped
 ```
 Start the next capability by branching off `main`. Keep one capability per
 branch/PR; keep `pytest -q` green;
