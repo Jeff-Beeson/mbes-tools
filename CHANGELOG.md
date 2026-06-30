@@ -12,13 +12,17 @@ add features; the public API is kept backward compatible where practical).
   series; `parse_installation` / `iter_installation_datagrams` decode the
   install string. New dataclasses `AttitudeSample`, `AttitudeDatagram`,
   `InstallationDatagram`.
-- **`.kmall` attitude (`#SKM`) and installation/runtime (`#IIP`/`#IOP`).**
-  `parse_skm_datagram` / `iter_skm_datagrams` decode the KMbinary
-  attitude/velocity/acceleration samples (advancing by `numBytesPerSample` so
-  versions are tolerated); `parse_kmall_params_datagram` /
-  `iter_iip_datagrams` / `iter_iop_datagrams` decode the parameter text. New
-  dataclasses `KMBinarySample`, `SKMDatagram`, `KmallParamsDatagram`. All share
-  the existing `on_error="skip"` resync.
+- **`.kmall` attitude (`#SKM`), installation/runtime (`#IIP`/`#IOP`), and
+  navigation (`#SPO`/`#CPO`).** `parse_skm_datagram` / `iter_skm_datagrams`
+  decode the KMbinary attitude/velocity/acceleration samples (advancing by
+  `numBytesPerSample` so versions are tolerated); `parse_kmall_params_datagram`
+  / `iter_iip_datagrams` / `iter_iop_datagrams` decode the parameter text;
+  `parse_position_datagram` / `iter_spo_datagrams` / `iter_cpo_datagrams` decode
+  the position sensor output (lat/lon, SOG/COG, ellipsoid height, fix quality,
+  raw NMEA) — the `.kmall` analogue of the `.all` `P` datagram (`#SPO` referred
+  to the vessel reference point, `#CPO` to the antenna at water level). New
+  dataclasses `KMBinarySample`, `SKMDatagram`, `KmallParamsDatagram`,
+  `KmallPositionDatagram`. All share the existing `on_error="skip"` resync.
 - **`mbes_tools.install_params`** — structures the Kongsberg install/runtime
   text (transducer **lever arms** `X/Y/Z`, **mount angles** `R/P/H`,
   **waterline**, EM model, serial) for downstream re-georeferencing / ARC
@@ -30,8 +34,10 @@ add features; the public API is kept backward compatible where practical).
   N·perSample + 4 == numBytesDgm`); EM124 `#IIP` → EM124 / SN 10055 / waterline
   0.74 m / TX (4.221, 0.914, 6.225) m, RX (8.558, 1.517, 6.225) m; EM302 `.all`
   `A` (102 samples, descriptor) and `I` → waterline −2.07 m, S1/S2 lever arms +
-  mount angles. No new fixtures required — these datagrams were already present
-  in `sample_tn447_em124.kmall` / `sample_nautilus.all`.
+  mount angles. `#SPO`/`#CPO` reconcile exactly and the decoded binary lat/lon
+  matches the embedded NMEA `GGA` (EM124 6.565°N/126.760°E; EM304 Monterey
+  36.467°N/−122.608°W). No new fixtures required — all these datagrams were
+  already present in `sample_tn447_em124.kmall` / `sample_nautilus.all`.
 
 ### Not yet
 - `.all` network attitude (`n`, 110) — the variable-length raw-input attitude

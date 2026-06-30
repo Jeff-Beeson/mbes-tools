@@ -87,6 +87,18 @@ KMBINARY_SIZE = struct.calcsize(KMBINARY_FMT)
 KMALL_PARAMS_FMT = "<3H"
 KMALL_PARAMS_SIZE = struct.calcsize(KMALL_PARAMS_FMT)
 
+# #SPO / #CPO sensor position output. Scommon cmnPart: numBytesCmnPart (u16),
+# sensorSystem (u16), sensorStatus (u16), padding (u16). Then a fixed data
+# block: timeFromSensor_sec (u32), timeFromSensor_nanosec (u32),
+# posFixQuality_m (f32), correctedLat_deg (f64), correctedLong_deg (f64),
+# speedOverGround_mPerSec (f32), courseOverGround_deg (f32),
+# ellipsoidHeightReRefPoint_m (f32), then the raw position-sensor (NMEA) string
+# up to the datagram end.
+SPO_CMN_FMT = "<4H"
+SPO_CMN_SIZE = struct.calcsize(SPO_CMN_FMT)
+SPO_DATA_FMT = "<2I1f2d3f"
+SPO_DATA_SIZE = struct.calcsize(SPO_DATA_FMT)
+
 
 # ---------------------------------------------------------------------------
 # Data classes for the parsed records.
@@ -239,6 +251,45 @@ class KmallParamsDatagram:
     info: int
     status: int
     parameters: InstallationParameters
+
+
+@dataclass
+class KmallPositionDatagram:
+    """Parsed #SPO (sensor position output) or #CPO (compatibility position).
+
+    The .kmall navigation datagram — the analogue of the .all ``P`` position
+    datagram. ``#SPO`` position is referred to the **vessel reference point**;
+    ``#CPO`` to the **antenna footprint at water level**. Both carry the active
+    position sensor's (motion-corrected, if enabled) latitude/longitude, speed
+    and course over ground, ellipsoid height, plus the **raw sensor text**
+    (typically the NMEA ``GGA`` sentence) in ``raw_position_string``.
+
+    When the sensor is inactive the numeric fields hold KMALL "unavailable"
+    sentinels outside normal ranges — check :attr:`is_available`.
+    """
+
+    dgm_type: str  # "#SPO" or "#CPO"
+    dgm_version: int
+    system_id: int
+    echo_sounder_id: int
+    time_s: int
+    time_ns: int
+    sensor_system: int
+    sensor_status: int
+    time_from_sensor_sec: int
+    time_from_sensor_nanosec: int
+    pos_fix_quality_m: float
+    latitude_deg: float
+    longitude_deg: float
+    speed_over_ground_m_s: float
+    course_over_ground_deg: float
+    ellipsoid_height_m: float
+    raw_position_string: bytes
+
+    @property
+    def is_available(self) -> bool:
+        """True when the active sensor supplied a usable position (lat/lon in range)."""
+        return -90.0 <= self.latitude_deg <= 90.0 and -180.0 <= self.longitude_deg <= 180.0
 
 
 # ---------------------------------------------------------------------------
@@ -798,3 +849,78 @@ def iter_iop_datagrams(
 ) -> Iterator[KmallParamsDatagram]:
     """Walk a .kmall file and yield each parsed #IOP runtime datagram."""
     yield from _iter_typed_datagrams(path, b"#IOP", parse_kmall_params_datagram, on_error, error_log)
+
+
+def parse_position_datagram(
+    fid, datagram_start: int, datagram_size: int
+) -> Optional[KmallPositionDatagram]:
+    """Parse one #SPO or #CPO position datagram into a :class:`KmallPositionDatagram`.
+
+    Both share the same layout (Scommon cmnPart + fixed data block + raw sensor
+    text). Returns ``None`` for other types.
+    """
+    fid.seek(datagram_start)
+    header = unpack_from_file(fid, DGM_HEADER_FMT)
+    num_bytes_dgm, dgm_type, dgm_version, system_id, echo_sounder_id, time_s, time_ns = header
+
+    if dgm_type not in (b"#SPO", b"#CPO"):
+        fid.seek(datagram_start + datagram_size)
+        return None
+
+    cmn_start = fid.tell()
+    num_bytes_cmn, sensor_system, sensor_status, _padding = unpack_from_file(fid, SPO_CMN_FMT)
+    fid.seek(cmn_start + int(num_bytes_cmn))
+
+    (
+        time_from_sensor_sec,
+        time_from_sensor_nanosec,
+        pos_fix_quality_m,
+        latitude_deg,
+        longitude_deg,
+        speed_over_ground,
+        course_over_ground,
+        ellipsoid_height_m,
+    ) = unpack_from_file(fid, SPO_DATA_FMT)
+
+    # The raw position-sensor string fills the rest of the datagram, before the
+    # trailing 4-byte length repeat. Trim to the end of the NMEA sentence.
+    text_len = (datagram_start + datagram_size - 4) - fid.tell()
+    raw = read_exact(fid, text_len) if text_len > 0 else b""
+    raw = raw.split(b"\r\n", 1)[0]
+
+    fid.seek(datagram_start + datagram_size)
+    return KmallPositionDatagram(
+        dgm_type=dgm_type.decode("ascii"),
+        dgm_version=int(dgm_version),
+        system_id=int(system_id),
+        echo_sounder_id=int(echo_sounder_id),
+        time_s=int(time_s),
+        time_ns=int(time_ns),
+        sensor_system=int(sensor_system),
+        sensor_status=int(sensor_status),
+        time_from_sensor_sec=int(time_from_sensor_sec),
+        time_from_sensor_nanosec=int(time_from_sensor_nanosec),
+        pos_fix_quality_m=float(pos_fix_quality_m),
+        latitude_deg=float(latitude_deg),
+        longitude_deg=float(longitude_deg),
+        speed_over_ground_m_s=float(speed_over_ground),
+        course_over_ground_deg=float(course_over_ground),
+        ellipsoid_height_m=float(ellipsoid_height_m),
+        raw_position_string=raw,
+    )
+
+
+def iter_spo_datagrams(
+    path: Path, on_error: str = "raise", error_log: Optional[list] = None
+) -> Iterator[KmallPositionDatagram]:
+    """Walk a .kmall file and yield each parsed #SPO sensor position datagram
+    (position referred to the vessel reference point)."""
+    yield from _iter_typed_datagrams(path, b"#SPO", parse_position_datagram, on_error, error_log)
+
+
+def iter_cpo_datagrams(
+    path: Path, on_error: str = "raise", error_log: Optional[list] = None
+) -> Iterator[KmallPositionDatagram]:
+    """Walk a .kmall file and yield each parsed #CPO compatibility position
+    datagram (position referred to the antenna footprint at water level)."""
+    yield from _iter_typed_datagrams(path, b"#CPO", parse_position_datagram, on_error, error_log)

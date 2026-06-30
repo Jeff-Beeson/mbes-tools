@@ -11,7 +11,7 @@ for the test corpus see `docs/VERIFICATION_DATA.md`; for mode maps see
 `capability-d1/water-column-validation`); **D3 attitude/installation parsers
 done** (v0.8.0, branch `capability-d3/attitude-installation`, stacked on D1);
 **D2** = backlog; **Samoa acceptance** pending data download.
-**Tests:** `python -m pytest -q` → 152 passed, 2 skipped (2 gated on
+**Tests:** `python -m pytest -q` → 153 passed, 2 skipped (2 gated on
 `MBES_TEST_DATA_ROOT` + matplotlib; a 3rd water-column test runs when the large
 external `phase_flag`-2 file is present).
 **Dependency contract:** core paths are **numpy + stdlib only**; scipy / pandas /
@@ -153,8 +153,10 @@ water-column clips `sample_tn447_em124.kmwcd` (EM124 `#MWC`, `phase_flag` 0),
   Next: geo-referenced echogram **grids/mosaics** + plume/midwater detection.
   Samoa-relevant.
 - **D3:** ✅ parsers done (v0.8.0) — attitude (`.all` `A`, `.kmall` `#SKM`) +
-  installation/runtime (`.all` `I`, `.kmall` `#IIP`/`#IOP`) + `install_params`
-  (lever arms, mount angles, waterline, model, serial). Next: **consumers** —
+  installation/runtime (`.all` `I`, `.kmall` `#IIP`/`#IOP`) + navigation
+  (`.all` `P` already; `.kmall` `#SPO`/`#CPO` position sensor output) +
+  `install_params` (lever arms, mount angles, waterline, model, serial). Next:
+  **consumers** —
   precise re-georeferencing, grazing-angle ARC refinement, AUV motion
   correction, manifest provenance. Not yet: `.all` `n` (110) network attitude.
 - **D2 (highest interoperability leverage):** native **GSF** reader feeding the

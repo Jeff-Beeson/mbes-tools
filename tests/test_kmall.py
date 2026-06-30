@@ -268,3 +268,36 @@ def test_em124_iop_runtime(sample_em124_kmall):
     assert iops
     assert iops[0].dgm_type == "#IOP"
     assert len(iops[0].parameters.raw) > 0
+
+
+def test_em124_spo_cpo_position(sample_em124_kmall):
+    """#SPO/#CPO navigation decodes to in-range lat/lon + SOG/COG and carries the
+    raw NMEA; the decoded position matches the embedded GGA sentence."""
+
+    def gga_lat_lon(raw: bytes):
+        # $..GGA,utc,ddmm.mmmm,N,dddmm.mmmm,E,...  -> decimal degrees
+        f = raw.decode("ascii", "replace").split(",")
+        lat = float(f[2][:2]) + float(f[2][2:]) / 60.0
+        if f[3] == "S":
+            lat = -lat
+        lon = float(f[4][:3]) + float(f[4][3:]) / 60.0
+        if f[5] == "W":
+            lon = -lon
+        return lat, lon
+
+    for it in (kmall.iter_spo_datagrams, kmall.iter_cpo_datagrams):
+        dgms = list(it(sample_em124_kmall))
+        assert dgms
+        d = dgms[0]
+        assert d.dgm_type in ("#SPO", "#CPO")
+        assert d.is_available
+        assert -90.0 <= d.latitude_deg <= 90.0
+        assert -180.0 <= d.longitude_deg <= 180.0
+        assert 0.0 <= d.speed_over_ground_m_s < 20.0
+        assert 0.0 <= d.course_over_ground_deg < 360.0
+        assert d.raw_position_string.startswith(b"$")  # NMEA sentence
+        # Decoded binary position matches the embedded GGA (within motion/lever
+        # correction, which is metres -> well under 0.001 deg).
+        glat, glon = gga_lat_lon(d.raw_position_string)
+        assert abs(glat - d.latitude_deg) < 1e-3
+        assert abs(glon - d.longitude_deg) < 1e-3

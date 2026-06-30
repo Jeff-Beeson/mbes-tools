@@ -105,7 +105,7 @@ a `CHANGELOG.md` entry per capability.
 ---
 
 ## 3. Build / test status
-- **`python -m pytest -q` → 152 passed, 2 skipped** at the tip of
+- **`python -m pytest -q` → 153 passed, 2 skipped** at the tip of
   `capability-d3/attitude-installation` (142/2 at D1, 131/2 on merged `main`).
 - The 2 skips are the gated cross-model test and the gated diagnostics render
   test; run them with `MBES_TEST_DATA_ROOT=<dir>` (+ matplotlib for the render).
@@ -222,7 +222,9 @@ additive. Recommended order and concrete first steps below.
 - **Done (branch `capability-d3/attitude-installation`, stacked on D1):**
   1. ✅ Parsers + dataclasses + `iter_*` helpers alongside the existing
      `P/X/Y/N/R`/#MRZ parsers: `.all` `A` attitude (65) + `I` installation (73);
-     `.kmall` `#SKM` attitude (KMbinary samples) + `#IIP`/`#IOP`. All share the
+     `.kmall` `#SKM` attitude (KMbinary samples) + `#IIP`/`#IOP` + `#SPO`/`#CPO`
+     navigation (position sensor output — the `.kmall` analogue of `.all` `P`,
+     with lat/lon/SOG/COG/ellipsoid height + raw NMEA). All share the
      `on_error="skip"` resync.
   2. ✅ `mbes_tools.install_params` structures the install/runtime text — lever
      arms (X/Y/Z), mount angles (R/P/H), waterline, EM model, serial — across
