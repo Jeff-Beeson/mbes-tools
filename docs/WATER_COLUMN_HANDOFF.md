@@ -6,12 +6,15 @@ the next phase. For the full per-capability status see `docs/BUILD_STATUS.md`
 (canonical), the API view in `docs/IMPLEMENTATION_SUMMARY.md`, the spec in
 `docs/UPGRADE_PLAN.md`, and the real-data corpus in `docs/VERIFICATION_DATA.md`.
 
-**As of:** 2026-06-30 · **Version:** 0.8.0 · **`main`** tip `5137d2c`.
-`pytest -q` = 153 passed, 2 skipped. D1 (water-column readers + `wc_diagnostics`,
-PR #8) **and** D3 (attitude/installation/navigation parsers + `install_params`,
-PR #9) are now **merged to `main`** — so the position/attitude/install path
-that true geo-referenced products need is available. **Next up: D1 products**
-(see "D1 products — start here" below).
+**As of:** 2026-06-30 · **Version:** 0.9.0 · **`main`** tip `5137d2c` (D1+D3
+merged). `pytest -q` = 168 passed, 2 skipped on the D1-products Slice 1 branch
+`capability-d1-products/vessel-frame-water-column` (153/2 on `main`). D1
+(water-column readers + `wc_diagnostics`) **and** D3 (attitude/installation/
+navigation parsers + `install_params`) are merged to `main` — so the position/
+attitude/install path that true geo-referenced products need is available.
+**Slice 1 (vessel-frame products) is now DONE** — `mbes_tools.water_column` +
+`mbes-wc-grid` (see "D1 products — start here" below). **Next up: Slice 2**
+(true geo-referenced grids/mosaics, uses the D3 path).
 
 ## What D1 delivered
 
@@ -129,19 +132,25 @@ branch/PR off `main`, version → 0.9.0). The attitude/nav/install path it needs
 landed in D3, so nothing is blocked. Recommended sequencing — cheapest, most
 demonstrable first:
 
-**Slice 1 (no new deps): vessel-frame water-column product + diagnostics.**
-- New module e.g. `mbes_tools.water_column` (or extend `wc_diagnostics`): turn a
-  parsed `#MWC`/`k` ping into an `(across_track_m, depth_m)` amplitude grid, and
-  reassemble fragmented `.wcd` pings by `counter` first. The geometry already
-  exists and is unit-tested: reuse `wc_diagnostics.wedge_coords` /
-  `range_axis` / `padded_grid` / `WCFrame` (`frame_from_mwc`, `frame_from_wcd`).
-- A first **midwater/plume anomaly** pass: TVG-residual (subtract a per-range
-  background / nadir reference) and flag coherent off-bottom returns above
-  `detected_range`. Keep core numpy+stdlib; matplotlib lazy.
-- **Verify** against committed fixtures (`sample_tn447_em124.kmwcd` EM124,
-  `sample_atlantis_em122.wcd` EM122, `sample_em2040_wc_phase1.kmall`) and state
-  what was used. The review plots in `~/mbes_review_plots/d1` are the visual
-  oracle.
+**Slice 1 (no new deps): vessel-frame water-column product + diagnostics — ✅ DONE (v0.9.0).**
+Delivered as `mbes_tools.water_column` (console script `mbes-wc-grid`):
+- `reassemble_wcd_pings` / `merge_wcd_fragments` — reassemble fragmented `.wcd`
+  pings by `counter` (beams partitioned across `k` datagrams by `datagram_num`);
+  `reassembled_wcd_frames(path)` yields a full-swath `WCFrame` per ping.
+- `grid_frame(frame) -> WaterColumnGrid` — bins a `#MWC`/`k` ping into an
+  `(across_track_m, depth_m)` amplitude grid, reusing `wc_diagnostics.wedge_coords`
+  / `range_axis` / `WCFrame` (`frame_from_mwc`, `frame_from_wcd`). `reduce="mean"`
+  = linear-intensity mean → dB (incoherent echo integration); `reduce="max"` =
+  peak-hold. Default cell = per-ping one-way range resolution.
+- `detect_anomalies(frame) -> WaterColumnAnomalies` + `summarize_anomalies` — the
+  first **midwater/plume** pass: per-range across-beam background over open water
+  (near-field + seafloor-guard excluded, above `detected_range`), TVG-residual,
+  robust `median + n_mad·MAD` (or fixed) threshold. Core numpy+stdlib; matplotlib
+  lazy (grid + anomaly panels).
+- **Verified:** `.wcd` reassembly on the full Atlantis EM122 file (762/762 pings
+  exact — `sum(beams_this) == num_beams_ping`); grid + anomaly on the committed
+  `sample_tn447_em124.kmwcd`, `sample_em2040_wc_phase1.kmall`,
+  `sample_atlantis_em122.wcd`. Review plots: `~/mbes_review_plots/wc_d1_products/`.
 
 **Slice 2 (true georeferencing, uses D3): geo-referenced echogram grid / mosaic.**
 - Compose the vessel-frame wedge with per-sample **position + heading + attitude

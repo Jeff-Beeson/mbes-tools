@@ -5,10 +5,15 @@
 (water-column reader validation + `wc_diagnostics`, v0.7.0), and **D3**
 (attitude/installation/navigation parsers + `install_params`, v0.8.0) are all
 implemented, verified against real data, and **merged to `main`** (tip
-`5137d2c`, **153 passed / 2 skipped**). **Next: D1 products** (water-column
-echograms / geo-mosaics / plume detection — kickoff plan in
-`docs/WATER_COLUMN_HANDOFF.md` → "D1 products — start here"). **D2** (GSF) and
-small follow-ups are the remaining backlog below.
+`5137d2c`, **153 passed / 2 skipped**). **D1 products Slice 1** — vessel-frame
+water-column products (`mbes_tools.water_column`: `.wcd` ping reassembly +
+`(across, depth)` gridding + TVG-residual plume/midwater anomaly pass;
+`mbes-wc-grid`) — is now implemented and verified (v0.9.0, **168 passed / 2
+skipped**) on branch `capability-d1-products/vessel-frame-water-column` (not yet
+merged as of this edit). **Next: D1 products Slice 2** (true geo-referenced
+echogram grids/mosaics using the D3 attitude/nav/install path — plan in
+`docs/WATER_COLUMN_HANDOFF.md` → "Slice 2"). **D2** (GSF) and small follow-ups
+are the remaining backlog below.
 
 > Read this together with `docs/UPGRADE_PLAN.md` (the spec),
 > `docs/VERIFICATION_DATA.md` (the real-data corpus + how to regenerate the
@@ -197,12 +202,24 @@ additive. Recommended order and concrete first steps below.
      histograms, and a sector-frequency sanity panel (matplotlib lazy; numeric
      helpers unit-tested; render test gated on matplotlib over the committed
      fixtures). This makes the D1 validation reproducible end-to-end.
-  4. ⏭️ **Next products** (likely separate PR): true geo-referenced echogram
-     **grids/mosaics** using `mbes_tools.projection`; midwater/plume anomaly
-     detection. Reassemble fragmented `.wcd` pings by `counter` (most EM122
-     pings span multiple `k` datagrams). Note `sample_freq_Hz` is heavily
-     decimated on deep CW systems (EM122 ~67 Hz, EM124 ~127 Hz) vs ~30 kHz on
-     EM2040 — physically correct, not a bug.
+  4. ✅ **Products Slice 1 (v0.9.0) — vessel-frame water column:**
+     `mbes_tools.water_column` (`mbes-wc-grid`). Reassembles fragmented `.wcd`
+     pings by `counter` (`reassemble_wcd_pings` — verified 762/762 exact on the
+     full Atlantis EM122 file), bins a `#MWC`/`k` ping into an
+     `(across_track_m, depth_m)` amplitude grid (`grid_frame`; intensity-mean or
+     peak-hold, reusing the `wc_diagnostics` wedge geometry), and runs a first
+     **TVG-residual midwater/plume anomaly** pass (`detect_anomalies`: per-range
+     across-beam background over open water — near-field + seafloor-guard
+     excluded — then a robust MAD threshold). Core numpy+stdlib; matplotlib lazy.
+     Note `sample_freq_Hz` is heavily decimated on deep CW systems (EM122 ~67 Hz,
+     EM124 ~127 Hz → 6–11 m range bins) vs ~30 kHz on EM2040 — physically
+     correct, not a bug; the grid derives its default cell size from it per ping.
+  5. ⏭️ **Products Slice 2 (next PR): true geo-referenced echogram
+     grids/mosaics** — compose the vessel-frame wedge with per-sample
+     position/heading/attitude + install lever arms (the D3 path:
+     `iter_spo_datagrams`/`iter_skm_datagrams`, `iter_position_datagrams`/
+     `iter_attitude_datagrams`, `install_params`) → real `(lon, lat, depth)`,
+     binned with `mbes_tools.projection` (auto-UTM; Samoa → EPSG:32702 / 2S).
 - **Why / trigger:** Samoa hydrothermal-plume / midwater detection and bottom-
   detection QC. Reader validation complete; products are the remaining work.
 

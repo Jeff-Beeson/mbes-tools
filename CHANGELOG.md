@@ -4,6 +4,45 @@ All notable changes to `mbes-tools` are documented here. The project follows
 [semantic versioning](https://semver.org/) (currently 0.x — minor versions may
 add features; the public API is kept backward compatible where practical).
 
+## [0.9.0] - 2026-06-30
+
+### Added (Capability D1 products — Slice 1: vessel-frame water column)
+- **`mbes_tools.water_column`** — the first *product* layer on the validated
+  water-column readers (no new dependencies; core numpy + stdlib, matplotlib
+  lazy). Three pieces:
+  - **`.wcd` ping reassembly** — `reassemble_wcd_pings` / `merge_wcd_fragments`
+    concatenate the multiple `k` datagrams of a fragmented ping (`num_datagram`
+    > 1, beams partitioned by `datagram_num`) back into one full swath, grouped
+    by `counter`; `reassembled_wcd_frames(path)` yields a `WCFrame` per full
+    ping. Streaming (bounded memory); truncated tail pings are dropped unless
+    `allow_incomplete=True`.
+  - **Cartesian gridding** — `grid_frame(frame) -> WaterColumnGrid`: bins each
+    amplitude sample onto a regular `(across_track_m, depth_m)` grid using the
+    existing `wc_diagnostics` wedge geometry (`r = c·k/(2·fs)`, angle positive =
+    port). `reduce="mean"` averages in the **linear-intensity domain**
+    (`10**(dB/10)` → back to dB, the correct incoherent echo-integration mean);
+    `reduce="max"` is a peak-hold. Default cell = one-way range resolution,
+    capped at `max_cells`; `max_depth_m` / `max_across_m` clip the extent.
+  - **TVG-residual midwater/plume anomaly pass** — `detect_anomalies(frame) ->
+    WaterColumnAnomalies`: subtract a per-range background (across-beam median of
+    **water-only** samples — near-field and seafloor + guard band excluded) to
+    flatten the TVG/absorption trend, then flag positive residual outliers with a
+    robust `median + n_mad·(1.4826·MAD)` threshold (or a fixed `threshold_db`).
+    `summarize_anomalies` returns a JSON-friendly per-ping summary.
+- **`mbes-wc-grid`** console script — renders a gridded-echogram panel and an
+  amplitude/residual/background anomaly panel per file (reassembling `.wcd` by
+  `counter` first) and prints the anomaly summary. matplotlib lazy (`gui` extra).
+- **Verified against real data:** `.wcd` reassembly on the full Atlantis EM122
+  file — **762/762 pings** reconstruct exactly (`sum(num_beams_this_datagram) ==
+  num_beams_ping` for every ping, mostly 2 fragments; beam numbers monotonic);
+  the committed 3-ping clip passes through unchanged. Grid + anomaly produce sane
+  vessel-frame geometry on the committed EM124 `.kmwcd` (symmetric ±30° swath to
+  ~6.7 km, `mean`/`max` consistent), EM2040 phase-1 `.kmall` (~9 m, 2.4 cm
+  cells), and reassembled EM122 `.wcd`; anomaly defaults yield non-zero water on
+  both deep and shallow regimes. Numeric helpers unit-tested; render test gated
+  on matplotlib over the committed fixtures. Review PNGs:
+  `~/mbes_review_plots/wc_d1_products/`.
+
 ## [0.8.0] - 2026-06-29
 
 ### Added (Capability D3 — attitude & installation parsers)
