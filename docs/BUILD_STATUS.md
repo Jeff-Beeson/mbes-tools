@@ -242,10 +242,17 @@ additive. Recommended order and concrete first steps below.
      `n_uncovered`). Verified: committed EM124 `.kmwcd` (single athwartship swath
      ⟂ the ~287° heading); auto-companion pulls `#SKM` from the sibling `.kmall`;
      full matched TN447 pair grids 39/40 pings on `#SKM` true heading with the
-     one genuinely-uncovered lead ping correctly skipped. Core numpy+stdlib;
-     matplotlib + pyproj lazy/optional. **Not yet wired:** `.wcd`/`.all` mosaic
-     path (only `.kmwcd`/`.kmall` `#MWC`); `#SKM` roll/pitch wedge correction
-     (heading-only) — a Slice-3 refinement.
+     one genuinely-uncovered lead ping correctly skipped. **Both formats are
+     wired:** `build_mosaic()` dispatches by extension — `.kmwcd`/`.kmall`
+     (`#MWC`) via `build_mosaic_from_kmall`, and `.wcd`/`.all` (`k`) via
+     `build_mosaic_from_wcd`, which reassembles fragmented `k` datagrams by
+     `counter` (Slice-1 `reassemble_wcd_pings`) and shares one absolute
+     `date + time` clock (`_all_header_time`) between the `k` ping time and the
+     `P` nav time (midnight-safe). Verified on the committed 3-ping EM122 `.wcd`
+     and the full 200-ping Atlantis `.wcd` (synthetic nav — no real `.wcd`/`.all`
+     pair on disk; a bare `.wcd` has no position of its own). Core numpy+stdlib;
+     matplotlib + pyproj lazy/optional. **Not yet wired:** `#SKM` roll/pitch
+     wedge correction (heading-only) — a Slice-3 refinement.
 - **Why / trigger:** Samoa hydrothermal-plume / midwater detection and bottom-
   detection QC. Reader validation complete; products are the remaining work.
 

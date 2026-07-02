@@ -265,6 +265,35 @@ def test_build_mosaic_on_uncovered_validation():
         wg.build_mosaic_from_kmall("no_such_file.kmwcd", nav=nav, on_uncovered="bogus")
 
 
+def test_build_mosaic_rejects_unknown_extension():
+    nav = const_nav(0.0, 0.0, 0.0)
+    with pytest.raises(ValueError, match="cannot build"):
+        wg.build_mosaic("survey.foo", nav=nav)
+
+
+# ---------------------------------------------------------------------------
+# .all-family clock: k water-column time and P nav time must share it.
+# ---------------------------------------------------------------------------
+
+
+class _Hdr:
+    def __init__(self, date, ms):
+        self.record_date = date
+        self.record_time_ms = ms
+
+
+def test_all_header_time_is_absolute_and_monotonic():
+    import datetime
+    ordi = datetime.date(2013, 7, 3).toordinal()
+    assert wg._all_header_time(_Hdr(20130703, 57406690)) == pytest.approx(ordi * 86400 + 57406.690)
+    # Monotonic across midnight (so interpolation doesn't jump at the wrap).
+    late = wg._all_header_time(_Hdr(20130703, (23 * 3600 + 59 * 60 + 59) * 1000))
+    nextday = wg._all_header_time(_Hdr(20130704, 1000))
+    assert nextday > late
+    # Unusable date -> falls back to seconds-since-midnight (both sources agree).
+    assert wg._all_header_time(_Hdr(0, 5000)) == pytest.approx(5.0)
+
+
 # ---------------------------------------------------------------------------
 # 4. Nav-source resolution (WC files are not assumed self-contained).
 # ---------------------------------------------------------------------------
@@ -372,6 +401,29 @@ def test_build_mosaic_clamp_grids_real_ping():
     # Deep abyssal EM124 ping -> the mapped footprint spans hundreds of metres.
     assert res.east_edges[-1] - res.east_edges[0] > 100.0
     assert "EPSG:326" in res.crs_label  # a northern-hemisphere UTM zone
+
+
+def test_build_mosaic_from_wcd_over_real_fixture():
+    """The 3-ping EM122 .wcd fixture has no position of its own, so nav is
+    supplied; this exercises k-datagram reassembly -> georef -> mosaic."""
+    wcd = FIXTURES / "sample_atlantis_em122.wcd"
+    if not wcd.exists():
+        pytest.skip("wcd fixture not present")
+    from mbes_tools.wcd import iter_water_column_datagrams
+    from mbes_tools.water_column import reassemble_wcd_pings
+
+    pings = list(reassemble_wcd_pings(iter_water_column_datagrams(wcd)))
+    times = [wg._all_header_time(p.header) for p in pings]
+    t0, t1 = min(times) - 1.0, max(times) + 1.0
+    nav = wg.NavTrack.from_lists([t0, t1], [30.0, 30.0], [-45.0, -45.0],
+                                 [t0, t1], [45.0, 45.0], "synthetic", "synthetic")
+    res = wg.build_mosaic_from_wcd(wcd, nav=nav, projector="local", cell_m=25.0, reduce="max")
+    assert res.n_pings == 3 and res.n_uncovered == 0
+    assert np.isfinite(res.amplitude_db).any()
+    assert "EPSG:326" in res.crs_label  # UTM 23N for the 30N/-45E synthetic anchor
+    # The extension dispatcher routes .wcd to the same builder.
+    via_dispatch = wg.build_mosaic(wcd, nav=nav, projector="local", cell_m=25.0)
+    assert via_dispatch.n_pings == 3
 
 
 @pytest.mark.skipif(not _HAS_MPL, reason="needs matplotlib")

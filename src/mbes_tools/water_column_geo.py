@@ -54,7 +54,7 @@ import numpy as np
 
 from mbes_tools.install_params import InstallationParameters
 from mbes_tools.projection import resolve_target_crs
-from mbes_tools.wc_diagnostics import WCFrame, frame_from_mwc, wedge_coords
+from mbes_tools.wc_diagnostics import WCFrame, frame_from_mwc, frame_from_wcd, wedge_coords
 
 # WGS84 semi-major axis — used by the local ENU (equirectangular) fallback.
 _WGS84_A = 6378137.0
@@ -551,6 +551,26 @@ def _mwc_time(dgm) -> float:
     return dgm.time_s + dgm.time_ns * 1e-9
 
 
+def _all_header_time(header) -> float:
+    """Absolute time (seconds) for a `.all`/`.wcd` datagram header.
+
+    Combines ``record_date`` (YYYYMMDD) and ``record_time_ms`` (ms since
+    midnight) into a monotonic day-ordinal + seconds value, so a ``k`` water-
+    column time and a companion ``P`` position time share one clock even across
+    midnight. Falls back to bare seconds-since-midnight if the date is unusable —
+    still self-consistent within a single day, which both sources share.
+    """
+    import datetime
+
+    secs = header.record_time_ms / 1000.0
+    try:
+        d = int(header.record_date)
+        ordinal = datetime.date(d // 10000, (d // 100) % 100, d % 100).toordinal()
+    except (ValueError, TypeError):
+        return secs
+    return ordinal * 86400.0 + secs
+
+
 def _companion_nav_paths(wc_path: Path) -> List[Path]:
     """Same-stem sibling carrying the full sensor stream, if one exists.
 
@@ -609,6 +629,79 @@ def resolve_nav_track(
     )
 
 
+def _resolve_nav_and_install(path, nav, nav_paths, install, install_paths, auto_companion):
+    """Fill in nav + install for a WC file (see :func:`resolve_nav_track`)."""
+    if nav is None:
+        nav = resolve_nav_track(path, nav_paths, auto_companion=auto_companion)
+    if install is None:
+        sources = [*(install_paths or []), path]
+        if auto_companion:
+            sources += _companion_nav_paths(path)
+        install = load_installation(sources)
+    return nav, install
+
+
+def _accumulate_mosaic(
+    path,
+    items,
+    time_fn,
+    frame_fn,
+    nav,
+    install,
+    *,
+    kind: str,
+    cell_m: float,
+    reduce: str,
+    depth_band: Optional[Tuple[float, float]],
+    projector: str,
+    max_depth_m: Optional[float],
+    on_uncovered: str,
+    coverage_tol_s: float,
+    limit: Optional[int],
+) -> GeoMosaicResult:
+    """Shared streaming core: georeference each ``(time, frame)`` into the mosaic.
+
+    ``time_fn(item)`` is evaluated first so an out-of-coverage ping can be
+    skipped *before* the (more expensive) ``frame_fn(item)`` decode. A shared
+    anchor (the first kept ping's position) fixes the local ENU frame.
+    """
+    if on_uncovered not in ("skip", "clamp"):
+        raise ValueError(f"on_uncovered must be 'skip' or 'clamp', got {on_uncovered!r}")
+    lo, hi = nav.time_span
+    mosaic = GeoMosaic(cell_m, reduce=reduce, depth_band=depth_band)
+    anchor: Optional[Tuple[float, float]] = None
+    n_uncovered = 0
+
+    for i, item in enumerate(items):
+        if limit is not None and i >= limit:
+            break
+        t = time_fn(item)
+        if not (lo - coverage_tol_s <= t <= hi + coverage_tol_s):
+            n_uncovered += 1
+            if on_uncovered == "skip":
+                continue
+        frame = frame_fn(item)
+        if anchor is None:
+            lat0, lon0 = (float(v) for v in nav.position_at(t))
+            anchor = (lon0, lat0)
+        mosaic.add_frame(
+            frame, t, nav, anchor_lonlat=anchor, install=install,
+            projector=projector, max_depth_m=max_depth_m,
+        )
+
+    if n_uncovered and on_uncovered == "skip":
+        import warnings
+        warnings.warn(
+            f"{Path(path).name}: {n_uncovered} {kind} ping(s) skipped — nav track "
+            f"{nav.position_source} spans [{lo:.0f},{hi:.0f}] but did not cover their "
+            f"time(s); check that the nav file matches this water-column file.",
+            stacklevel=3,
+        )
+    result = mosaic.finalize()
+    result.n_uncovered = n_uncovered
+    return result
+
+
 def build_mosaic_from_kmall(
     path: Path,
     *,
@@ -644,50 +737,76 @@ def build_mosaic_from_kmall(
     """
     from mbes_tools.kmwcd import iter_mwc_datagrams
 
-    if on_uncovered not in ("skip", "clamp"):
-        raise ValueError(f"on_uncovered must be 'skip' or 'clamp', got {on_uncovered!r}")
     path = Path(path)
-    if nav is None:
-        nav = resolve_nav_track(path, nav_paths, auto_companion=auto_companion)
-    if install is None:
-        sources = [*(install_paths or []), path]
-        if auto_companion:
-            sources += _companion_nav_paths(path)
-        install = load_installation(sources)
+    nav, install = _resolve_nav_and_install(
+        path, nav, nav_paths, install, install_paths, auto_companion
+    )
+    return _accumulate_mosaic(
+        path, iter_mwc_datagrams(path), _mwc_time, frame_from_mwc, nav, install,
+        kind="#MWC", cell_m=cell_m, reduce=reduce, depth_band=depth_band,
+        projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
+        coverage_tol_s=coverage_tol_s, limit=limit,
+    )
 
-    lo, hi = nav.time_span
-    mosaic = GeoMosaic(cell_m, reduce=reduce, depth_band=depth_band)
-    anchor: Optional[Tuple[float, float]] = None
-    n_uncovered = 0
 
-    for i, dgm in enumerate(iter_mwc_datagrams(path)):
-        if limit is not None and i >= limit:
-            break
-        t = _mwc_time(dgm)
-        if not (lo - coverage_tol_s <= t <= hi + coverage_tol_s):
-            n_uncovered += 1
-            if on_uncovered == "skip":
-                continue
-        frame = frame_from_mwc(dgm)
-        if anchor is None:
-            lat0, lon0 = (float(v) for v in nav.position_at(t))
-            anchor = (lon0, lat0)
-        mosaic.add_frame(
-            frame, t, nav, anchor_lonlat=anchor, install=install,
-            projector=projector, max_depth_m=max_depth_m,
-        )
+def build_mosaic_from_wcd(
+    path: Path,
+    *,
+    nav: Optional[NavTrack] = None,
+    nav_paths: Optional[Sequence[Path]] = None,
+    install: Optional[InstallationParameters] = None,
+    install_paths: Optional[Sequence[Path]] = None,
+    auto_companion: bool = True,
+    cell_m: float = 25.0,
+    reduce: str = "max",
+    depth_band: Optional[Tuple[float, float]] = None,
+    projector: str = "auto",
+    max_depth_m: Optional[float] = None,
+    on_uncovered: str = "skip",
+    coverage_tol_s: float = 2.0,
+    limit: Optional[int] = None,
+    allow_incomplete: bool = False,
+) -> GeoMosaicResult:
+    """Accumulate a mosaic from a `.wcd`/`.all` ``k`` Water Column file.
 
-    if n_uncovered and on_uncovered == "skip":
-        import warnings
-        warnings.warn(
-            f"{path.name}: {n_uncovered} #MWC ping(s) skipped — nav track "
-            f"{nav.position_source} spans [{lo:.0f},{hi:.0f}] but did not cover their "
-            f"time(s); check that the nav file matches this water-column file.",
-            stacklevel=2,
-        )
-    result = mosaic.finalize()
-    result.n_uncovered = n_uncovered
-    return result
+    Same as :func:`build_mosaic_from_kmall` but for the ``.all`` family: the
+    (often fragmented) ``k`` datagrams are reassembled by ``counter`` into full
+    pings (:func:`mbes_tools.water_column.reassemble_wcd_pings`), and both the
+    ping time and the ``P`` nav time use the same absolute ``date + time``
+    clock (:func:`_all_header_time`). A bare `.wcd` has **no position of its
+    own** — nav almost always comes from the companion `.all` (auto-discovered),
+    which is exactly why the WC file must not be assumed self-contained.
+    """
+    from mbes_tools.wcd import iter_water_column_datagrams
+    from mbes_tools.water_column import reassemble_wcd_pings
+
+    path = Path(path)
+    nav, install = _resolve_nav_and_install(
+        path, nav, nav_paths, install, install_paths, auto_companion
+    )
+    pings = reassemble_wcd_pings(
+        iter_water_column_datagrams(path), allow_incomplete=allow_incomplete
+    )
+    return _accumulate_mosaic(
+        path, pings, lambda p: _all_header_time(p.header), frame_from_wcd, nav, install,
+        kind="k", cell_m=cell_m, reduce=reduce, depth_band=depth_band,
+        projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
+        coverage_tol_s=coverage_tol_s, limit=limit,
+    )
+
+
+def build_mosaic(path: Path, **kwargs) -> GeoMosaicResult:
+    """Dispatch to the `.kmall`/`.kmwcd` or `.wcd`/`.all` mosaic builder by extension.
+
+    ``allow_incomplete`` (``.wcd`` only) is ignored for the `.kmall` path.
+    """
+    ext = Path(path).suffix.lower()
+    if ext in (".kmall", ".kmwcd"):
+        kwargs.pop("allow_incomplete", None)
+        return build_mosaic_from_kmall(path, **kwargs)
+    if ext in (".wcd", ".all"):
+        return build_mosaic_from_wcd(path, **kwargs)
+    raise ValueError(f"cannot build a water-column mosaic from {ext!r} files")
 
 
 def generate(
@@ -705,10 +824,12 @@ def generate(
     on_uncovered: str = "skip",
     limit: Optional[int] = None,
 ) -> List[Path]:
-    """Build + render a mosaic panel per `.kmall`/`.kmwcd` file. Returns PNG paths.
+    """Build + render a mosaic panel per water-column file. Returns PNG paths.
 
-    ``nav_paths`` (if given) supplies the navigation for every file; otherwise
-    each file's nav is resolved independently (companion sibling, then in-file).
+    Accepts both families (dispatched by extension): `.kmwcd`/`.kmall` (``#MWC``)
+    and `.wcd`/`.all` (``k``). ``nav_paths`` (if given) supplies the navigation
+    for every file; otherwise each file's nav is resolved independently
+    (companion sibling, then in-file).
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -721,7 +842,7 @@ def generate(
             print("SKIP", f, "-> no navigation:", str(exc)[:200])
             continue
         try:
-            result = build_mosaic_from_kmall(
+            result = build_mosaic(
                 Path(f), nav=nav, install_paths=install_paths, auto_companion=auto_companion,
                 cell_m=cell_m, reduce=reduce, depth_band=depth_band,
                 projector=projector, max_depth_m=max_depth_m,
@@ -750,12 +871,13 @@ def _parse_band(spec: Optional[str]) -> Optional[Tuple[float, float]]:
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
     ap = argparse.ArgumentParser(
-        description="Geo-referenced water-column mosaic: accumulate #MWC pings into a "
-                    "plan-view (easting/northing) amplitude grid using in-file nav + install."
+        description="Geo-referenced water-column mosaic: accumulate water-column pings "
+                    "(.kmwcd/.kmall #MWC or .wcd/.all k) into a plan-view "
+                    "(easting/northing) amplitude grid using companion nav + install."
     )
     ap.add_argument("-o", "--output", default="mbes_wc_mosaic", help="Output directory for PNGs.")
     ap.add_argument("--mwc", nargs="+", required=True,
-                    help="One or more #MWC-bearing files (.kmwcd or .kmall).")
+                    help="One or more water-column files (.kmwcd/.kmall or .wcd/.all).")
     ap.add_argument("--nav", nargs="+", default=None, metavar="FILE",
                     help="Companion file(s) to build the nav track from (.kmall/.all — prefers "
                          "#SKM true heading). Overrides in-file nav; use when the WC file lacks "
