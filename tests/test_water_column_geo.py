@@ -271,6 +271,23 @@ def test_build_mosaic_rejects_unknown_extension():
         wg.build_mosaic("survey.foo", nav=nav)
 
 
+def test_composite_on_uncovered_validation():
+    with pytest.raises(ValueError, match="on_uncovered"):
+        wg.build_composite_mosaic([], on_uncovered="bogus")
+
+
+def test_composite_skips_navless_file_without_crashing(tmp_path):
+    orphan = tmp_path / "0001_x.kmwcd"
+    orphan.write_bytes(b"not a datagram stream")
+    res = wg.build_composite_mosaic([orphan], projector="local")  # no nav -> file skipped
+    assert res.n_pings == 0 and not np.isfinite(res.amplitude_db).any()
+
+
+def test_file_ping_source_rejects_unknown_extension():
+    with pytest.raises(ValueError):
+        wg._file_ping_source(Path("survey.foo"))
+
+
 # ---------------------------------------------------------------------------
 # .all-family clock: k water-column time and P nav time must share it.
 # ---------------------------------------------------------------------------
@@ -426,6 +443,22 @@ def test_build_mosaic_from_wcd_over_real_fixture():
     assert via_dispatch.n_pings == 3
 
 
+def test_composite_accumulates_multiple_files_into_one_grid():
+    """Two files -> one mosaic with a shared anchor. Feeding the same real ping
+    twice must land in the same cells (n_pings=2, geometry unchanged)."""
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    single = wg.build_mosaic_from_kmall(
+        fx, projector="local", cell_m=25.0, auto_companion=False, on_uncovered="clamp")
+    comp = wg.build_composite_mosaic(
+        [fx, fx], projector="local", cell_m=25.0, auto_companion=False, on_uncovered="clamp")
+    assert comp.n_pings == 2  # both files contributed a ping
+    # Shared anchor -> identical footprint; peak-hold value unchanged by duplication.
+    assert comp.amplitude_db.shape == single.amplitude_db.shape
+    assert np.array_equal(np.isfinite(comp.amplitude_db), np.isfinite(single.amplitude_db))
+
+
 @pytest.mark.skipif(not _HAS_MPL, reason="needs matplotlib")
 def test_generate_mosaic_panel(tmp_path):
     fx = FIXTURES / "sample_tn447_em124.kmwcd"
@@ -435,3 +468,14 @@ def test_generate_mosaic_panel(tmp_path):
                        auto_companion=False, on_uncovered="clamp")
     assert made and all(p.exists() and p.stat().st_size > 0 for p in made)
     assert all("wc_mosaic_" in p.name for p in made)
+
+
+@pytest.mark.skipif(not _HAS_MPL, reason="needs matplotlib")
+def test_generate_combine_makes_single_composite_panel(tmp_path):
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    made = wg.generate(tmp_path, mwc_files=[fx, fx], combine=True, projector="local",
+                       cell_m=25.0, auto_companion=False, on_uncovered="clamp")
+    assert len(made) == 1 and "composite" in made[0].name
+    assert made[0].exists() and made[0].stat().st_size > 0

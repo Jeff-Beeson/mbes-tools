@@ -250,9 +250,17 @@ additive. Recommended order and concrete first steps below.
      `date + time` clock (`_all_header_time`) between the `k` ping time and the
      `P` nav time (midnight-safe). Verified on the committed 3-ping EM122 `.wcd`
      and the full 200-ping Atlantis `.wcd` (synthetic nav — no real `.wcd`/`.all`
-     pair on disk; a bare `.wcd` has no position of its own). Core numpy+stdlib;
-     matplotlib + pyproj lazy/optional. **Not yet wired:** `#SKM` roll/pitch
-     wedge correction (heading-only) — a Slice-3 refinement.
+     pair on disk; a bare `.wcd` has no position of its own). **Multi-line
+     composite:** `build_composite_mosaic([...])` (CLI `--combine`) accumulates
+     many files into one shared-anchor mosaic (adjacent lines → a single coverage
+     map; nav-less files skipped, not fatal). **Midwater/plume product** via
+     `--depth-band LO:HI` (+ `--reduce mean` for echo-integration). Verified
+     end-to-end on the real EM304 matched pair H14070/S221 (Cascadia, ~2300 m):
+     single-line grids a correct N–S track ribbon with the nadir seafloor stripe,
+     ±2.8 km swath (=2300·tan50°), UTM 10N, `#SKM` heading (370/372 pings, 2 lead
+     pings skipped); a 4-line `--combine` composes one coverage map. Core
+     numpy+stdlib; matplotlib + pyproj lazy/optional. **Not yet wired:** `#SKM`
+     roll/pitch wedge correction (heading-only) — a Slice-3 refinement.
 - **Why / trigger:** Samoa hydrothermal-plume / midwater detection and bottom-
   detection QC. Reader validation complete; products are the remaining work.
 

@@ -641,6 +641,61 @@ def _resolve_nav_and_install(path, nav, nav_paths, install, install_paths, auto_
     return nav, install
 
 
+def _warn_uncovered(path, kind, n_uncovered, nav):
+    lo, hi = nav.time_span
+    import warnings
+    warnings.warn(
+        f"{Path(path).name}: {n_uncovered} {kind} ping(s) skipped — nav track "
+        f"{nav.position_source} spans [{lo:.0f},{hi:.0f}] but did not cover their "
+        f"time(s); check that the nav file matches this water-column file.",
+        stacklevel=3,
+    )
+
+
+def _accumulate_into(
+    mosaic: "GeoMosaic",
+    anchor_ref: List[Optional[Tuple[float, float]]],
+    items,
+    time_fn,
+    frame_fn,
+    nav,
+    *,
+    install,
+    projector: str,
+    max_depth_m: Optional[float],
+    on_uncovered: str,
+    coverage_tol_s: float,
+    limit: Optional[int],
+) -> int:
+    """Georeference one file's pings into ``mosaic``; return the skipped count.
+
+    ``time_fn(item)`` is evaluated first so an out-of-coverage ping can be
+    skipped *before* the (more expensive) ``frame_fn(item)`` decode.
+    ``anchor_ref`` is a 1-element list holding the shared ``(lon, lat)`` local-ENU
+    anchor — ``[None]`` until the first kept ping sets it — so a composite mosaic
+    keeps one anchor (hence one CRS) across many files.
+    """
+    lo, hi = nav.time_span
+    n_uncovered = 0
+    for i, item in enumerate(items):
+        if limit is not None and i >= limit:
+            break
+        t = time_fn(item)
+        if not (lo - coverage_tol_s <= t <= hi + coverage_tol_s):
+            n_uncovered += 1
+            if on_uncovered == "skip":
+                continue
+        frame = frame_fn(item)
+        if anchor_ref[0] is None:
+            lat0, lon0 = (float(v) for v in nav.position_at(t))
+            anchor_ref[0] = (lon0, lat0)
+        mosaic.add_frame(
+            frame, t, nav, anchor_lonlat=anchor_ref[0], install=install,
+            projector=projector, max_depth_m=max_depth_m,
+        )
+    return n_uncovered
+
+
 def _accumulate_mosaic(
     path,
     items,
@@ -659,44 +714,17 @@ def _accumulate_mosaic(
     coverage_tol_s: float,
     limit: Optional[int],
 ) -> GeoMosaicResult:
-    """Shared streaming core: georeference each ``(time, frame)`` into the mosaic.
-
-    ``time_fn(item)`` is evaluated first so an out-of-coverage ping can be
-    skipped *before* the (more expensive) ``frame_fn(item)`` decode. A shared
-    anchor (the first kept ping's position) fixes the local ENU frame.
-    """
+    """Single-file wrapper over :func:`_accumulate_into` (own mosaic + anchor)."""
     if on_uncovered not in ("skip", "clamp"):
         raise ValueError(f"on_uncovered must be 'skip' or 'clamp', got {on_uncovered!r}")
-    lo, hi = nav.time_span
     mosaic = GeoMosaic(cell_m, reduce=reduce, depth_band=depth_band)
-    anchor: Optional[Tuple[float, float]] = None
-    n_uncovered = 0
-
-    for i, item in enumerate(items):
-        if limit is not None and i >= limit:
-            break
-        t = time_fn(item)
-        if not (lo - coverage_tol_s <= t <= hi + coverage_tol_s):
-            n_uncovered += 1
-            if on_uncovered == "skip":
-                continue
-        frame = frame_fn(item)
-        if anchor is None:
-            lat0, lon0 = (float(v) for v in nav.position_at(t))
-            anchor = (lon0, lat0)
-        mosaic.add_frame(
-            frame, t, nav, anchor_lonlat=anchor, install=install,
-            projector=projector, max_depth_m=max_depth_m,
-        )
-
+    n_uncovered = _accumulate_into(
+        mosaic, [None], items, time_fn, frame_fn, nav, install=install,
+        projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
+        coverage_tol_s=coverage_tol_s, limit=limit,
+    )
     if n_uncovered and on_uncovered == "skip":
-        import warnings
-        warnings.warn(
-            f"{Path(path).name}: {n_uncovered} {kind} ping(s) skipped — nav track "
-            f"{nav.position_source} spans [{lo:.0f},{hi:.0f}] but did not cover their "
-            f"time(s); check that the nav file matches this water-column file.",
-            stacklevel=3,
-        )
+        _warn_uncovered(path, kind, n_uncovered, nav)
     result = mosaic.finalize()
     result.n_uncovered = n_uncovered
     return result
@@ -809,9 +837,24 @@ def build_mosaic(path: Path, **kwargs) -> GeoMosaicResult:
     raise ValueError(f"cannot build a water-column mosaic from {ext!r} files")
 
 
-def generate(
-    output_dir,
-    mwc_files: Sequence = (),
+def _file_ping_source(path: Path, *, allow_incomplete: bool = False):
+    """``(kind, items, time_fn, frame_fn)`` for a WC file, selected by extension."""
+    ext = Path(path).suffix.lower()
+    if ext in (".kmall", ".kmwcd"):
+        from mbes_tools.kmwcd import iter_mwc_datagrams
+        return "#MWC", iter_mwc_datagrams(Path(path)), _mwc_time, frame_from_mwc
+    if ext in (".wcd", ".all"):
+        from mbes_tools.wcd import iter_water_column_datagrams
+        from mbes_tools.water_column import reassemble_wcd_pings
+        pings = reassemble_wcd_pings(
+            iter_water_column_datagrams(Path(path)), allow_incomplete=allow_incomplete
+        )
+        return "k", pings, lambda p: _all_header_time(p.header), frame_from_wcd
+    raise ValueError(f"cannot read water-column pings from {ext!r} files")
+
+
+def build_composite_mosaic(
+    paths: Sequence[Path],
     *,
     nav_paths: Optional[Sequence[Path]] = None,
     install_paths: Optional[Sequence[Path]] = None,
@@ -822,17 +865,99 @@ def generate(
     projector: str = "auto",
     max_depth_m: Optional[float] = None,
     on_uncovered: str = "skip",
+    coverage_tol_s: float = 2.0,
+    limit: Optional[int] = None,
+    allow_incomplete: bool = False,
+    verbose: bool = False,
+) -> GeoMosaicResult:
+    """Accumulate **many** water-column files into one shared plan-view mosaic.
+
+    Every file's pings go into a single :class:`GeoMosaic` sharing one anchor
+    (the first kept ping of the first file), so adjacent survey lines compose
+    into one coverage map — filling the along-track gaps a single line leaves.
+    Files may mix ``.kmwcd``/``.kmall`` and ``.wcd``/``.all`` (each resolves its
+    own companion nav). A file with no resolvable nav is skipped, not fatal.
+
+    The returned :class:`GeoMosaicResult` covers the union extent;
+    ``n_pings``/``n_uncovered`` are summed across the contributing files.
+    """
+    if on_uncovered not in ("skip", "clamp"):
+        raise ValueError(f"on_uncovered must be 'skip' or 'clamp', got {on_uncovered!r}")
+    mosaic = GeoMosaic(cell_m, reduce=reduce, depth_band=depth_band)
+    anchor_ref: List[Optional[Tuple[float, float]]] = [None]
+    total_uncovered = 0
+    for p in paths:
+        p = Path(p)
+        try:
+            nav, install = _resolve_nav_and_install(
+                p, None, nav_paths, None, install_paths, auto_companion
+            )
+        except ValueError as exc:
+            if verbose:
+                print("SKIP", p.name, "-> no navigation:", str(exc)[:160])
+            continue
+        kind, items, time_fn, frame_fn = _file_ping_source(p, allow_incomplete=allow_incomplete)
+        n_unc = _accumulate_into(
+            mosaic, anchor_ref, items, time_fn, frame_fn, nav, install=install,
+            projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
+            coverage_tol_s=coverage_tol_s, limit=limit,
+        )
+        total_uncovered += n_unc
+        if verbose:
+            status = f"skipped {n_unc} uncovered" if n_unc else "all pings covered"
+            print(f"  + {p.name}: nav={nav.position_source}, {status}")
+        if n_unc and on_uncovered == "skip":
+            _warn_uncovered(p, kind, n_unc, nav)
+    result = mosaic.finalize()
+    result.n_uncovered = total_uncovered
+    return result
+
+
+def generate(
+    output_dir,
+    mwc_files: Sequence = (),
+    *,
+    nav_paths: Optional[Sequence[Path]] = None,
+    install_paths: Optional[Sequence[Path]] = None,
+    auto_companion: bool = True,
+    combine: bool = False,
+    cell_m: float = 25.0,
+    reduce: str = "max",
+    depth_band: Optional[Tuple[float, float]] = None,
+    projector: str = "auto",
+    max_depth_m: Optional[float] = None,
+    on_uncovered: str = "skip",
     limit: Optional[int] = None,
 ) -> List[Path]:
-    """Build + render a mosaic panel per water-column file. Returns PNG paths.
+    """Build + render mosaic panel(s) from water-column files. Returns PNG paths.
 
     Accepts both families (dispatched by extension): `.kmwcd`/`.kmall` (``#MWC``)
     and `.wcd`/`.all` (``k``). ``nav_paths`` (if given) supplies the navigation
     for every file; otherwise each file's nav is resolved independently
-    (companion sibling, then in-file).
+    (companion sibling, then in-file). With ``combine=True`` all files accumulate
+    into **one** composite mosaic (one panel); otherwise one panel per file.
     """
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
+    if combine:
+        files = [Path(f) for f in mwc_files]
+        print(f"Combining {len(files)} file(s) into one composite mosaic...")
+        result = build_composite_mosaic(
+            files, nav_paths=nav_paths, install_paths=install_paths,
+            auto_companion=auto_companion, cell_m=cell_m, reduce=reduce,
+            depth_band=depth_band, projector=projector, max_depth_m=max_depth_m,
+            on_uncovered=on_uncovered, limit=limit, verbose=True,
+        )
+        uncov = f", {result.n_uncovered} uncovered-skipped" if result.n_uncovered else ""
+        print(f"OK   composite: {result.n_pings} pings, grid {result.amplitude_db.shape}, "
+              f"{int(result.counts.sum())} samples{uncov}, {result.crs_label}")
+        stem = f"composite_{len(files)}files"
+        try:
+            return [panel_mosaic(result, out, stem)]
+        except Exception as exc:  # noqa: BLE001
+            print("FAIL panel", stem, "->", type(exc).__name__, str(exc)[:120])
+            return []
+
     made: List[Path] = []
     for f in mwc_files:
         stem = Path(f).stem
@@ -888,6 +1013,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                          "or its companion.")
     ap.add_argument("--no-auto-companion", action="store_true",
                     help="Do not auto-use a same-stem .kmall/.all sibling for nav/install.")
+    ap.add_argument("--combine", action="store_true",
+                    help="Accumulate ALL --mwc files into one composite mosaic (one panel) "
+                         "instead of one panel per file — e.g. adjacent survey lines into a "
+                         "single coverage map.")
     ap.add_argument("--cell-m", type=float, default=25.0, help="Mosaic cell size (metres).")
     ap.add_argument("--reduce", choices=["max", "mean"], default="max",
                     help="Cell aggregation over depth: peak-hold max (default) or intensity-mean.")
@@ -904,7 +1033,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     made = generate(
         args.output, mwc_files=args.mwc, nav_paths=args.nav, install_paths=args.install,
-        auto_companion=not args.no_auto_companion, cell_m=args.cell_m, reduce=args.reduce,
+        auto_companion=not args.no_auto_companion, combine=args.combine,
+        cell_m=args.cell_m, reduce=args.reduce,
         depth_band=_parse_band(args.depth_band), projector=args.projector,
         max_depth_m=args.max_depth_m, on_uncovered=args.on_uncovered, limit=args.limit,
     )
