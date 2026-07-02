@@ -8,12 +8,18 @@ implemented, verified against real data, and **merged to `main`** (tip
 `5137d2c`, **153 passed / 2 skipped**). **D1 products Slice 1** — vessel-frame
 water-column products (`mbes_tools.water_column`: `.wcd` ping reassembly +
 `(across, depth)` gridding + TVG-residual plume/midwater anomaly pass;
-`mbes-wc-grid`) — is implemented and verified (v0.9.0). **D1 products Slice 2** —
-true geo-referenced plan-view mosaics (`mbes_tools.water_column_geo`:
-`NavTrack` + `georeference_frame` + streaming `GeoMosaic`; `mbes-wc-mosaic`) —
-is now implemented and verified (v0.10.0, **190 passed / 2 skipped**) on branch
-`capability-d1-products/vessel-frame-water-column` (not yet merged as of this
-edit). **Next: D2** (GSF) and small follow-ups are the remaining backlog below.
+`mbes-wc-grid`) — is implemented and verified (v0.9.0). **D1 products Slices 2–3**
+— true geo-referenced plan-view mosaics (`mbes_tools.water_column_geo`:
+`NavTrack` + `georeference_frame` + streaming `GeoMosaic`; `mbes-wc-mosaic`),
+robust companion-nav resolution + coverage guard, `.wcd`/`.all` support, a
+multi-line `--combine` composite, the `--depth-band` midwater/plume product, and
+vessel attitude (roll/pitch/heave, with the beam fan correctly left
+roll-stabilized) — are implemented and verified against real EM124/EM122/EM304
+data (v0.10.0, **212 passed / 2 skipped**). **D1 water-column products are
+functionally complete.** Work is on branch
+`capability-d1-products/vessel-frame-water-column` (pushed to origin, tip
+`88cb0f4`; **PR not yet opened** against `main`). **Next: D2** (native GSF
+reader) and small follow-ups are the remaining backlog below.
 
 > Read this together with `docs/UPGRADE_PLAN.md` (the spec),
 > `docs/VERIFICATION_DATA.md` (the real-data corpus + how to regenerate the
