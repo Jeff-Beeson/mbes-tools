@@ -258,12 +258,77 @@ def test_mosaic_centers_are_edge_midpoints():
     assert out.north_centers[0] == pytest.approx(25.0)
 
 
+def test_build_mosaic_on_uncovered_validation():
+    # Bad policy is rejected before any file I/O (nav supplied, path never read).
+    nav = const_nav(0.0, 0.0, 0.0)
+    with pytest.raises(ValueError, match="on_uncovered"):
+        wg.build_mosaic_from_kmall("no_such_file.kmwcd", nav=nav, on_uncovered="bogus")
+
+
+# ---------------------------------------------------------------------------
+# 4. Nav-source resolution (WC files are not assumed self-contained).
+# ---------------------------------------------------------------------------
+
+
+def test_companion_nav_paths_maps_by_stem(tmp_path):
+    kmwcd = tmp_path / "0180_survey.kmwcd"
+    kmall = tmp_path / "0180_survey.kmall"
+    kmwcd.write_bytes(b"")
+    # No sibling yet -> nothing discovered.
+    assert wg._companion_nav_paths(kmwcd) == []
+    kmall.write_bytes(b"")
+    assert wg._companion_nav_paths(kmwcd) == [kmall]
+    # .wcd -> .all; a full-datagram file has no companion of its own.
+    wcd = tmp_path / "line.wcd"
+    allf = tmp_path / "line.all"
+    wcd.write_bytes(b"")
+    allf.write_bytes(b"")
+    assert wg._companion_nav_paths(wcd) == [allf]
+    assert wg._companion_nav_paths(kmall) == []
+
+
+def test_resolve_nav_track_errors_without_any_source(tmp_path):
+    # A lone .kmwcd with no parseable nav and no sibling -> actionable error.
+    orphan = tmp_path / "0001_orphan.kmwcd"
+    orphan.write_bytes(b"not a real datagram stream")
+    with pytest.raises(ValueError, match="no navigation"):
+        wg.resolve_nav_track(orphan)
+
+
 # ---------------------------------------------------------------------------
 # Gated end-to-end over the committed real EM124 .kmwcd fixture.
 # ---------------------------------------------------------------------------
 
 FIXTURES = Path(__file__).parent / "fixtures"
 _HAS_MPL = importlib.util.find_spec("matplotlib") is not None
+
+
+def test_resolve_nav_prefers_companion_skm_over_wc_spo():
+    """The committed .kmwcd has only #SPO; its same-stem .kmall companion has
+    #SKM true heading, so companion discovery must upgrade the nav source."""
+    kmwcd = FIXTURES / "sample_tn447_em124.kmwcd"
+    kmall = FIXTURES / "sample_tn447_em124.kmall"
+    if not (kmwcd.exists() and kmall.exists()):
+        pytest.skip("EM124 fixture pair not present")
+    # Auto companion -> nav comes from the .kmall's #SKM (true heading).
+    nav_auto = wg.resolve_nav_track(kmwcd, auto_companion=True)
+    assert nav_auto.position_source == "#SKM"
+    # Opt out -> falls back to the .kmwcd's own #SPO course-over-ground.
+    nav_own = wg.resolve_nav_track(kmwcd, auto_companion=False)
+    assert nav_own.position_source == "#SPO"
+    # Explicit nav_paths wins regardless.
+    nav_explicit = wg.resolve_nav_track(kmwcd, nav_paths=[kmall])
+    assert nav_explicit.position_source == "#SKM"
+
+
+def test_resolve_nav_track_errors_on_navless_wcd():
+    """A bare .wcd carries no P position datagram, so nav must come elsewhere."""
+    wcd = FIXTURES / "sample_atlantis_em122.wcd"
+    if not wcd.exists():
+        pytest.skip("wcd fixture not present")
+    # No same-stem .all sibling committed -> resolution fails with guidance.
+    with pytest.raises(ValueError, match="no navigation"):
+        wg.resolve_nav_track(wcd)
 
 
 def test_nav_track_and_install_from_real_kmwcd():
@@ -279,15 +344,31 @@ def test_nav_track_and_install_from_real_kmwcd():
     assert wg._resolve_group(install) in ("TRAI_RX1", "TRAI_TX1")
 
 
-def test_build_mosaic_over_real_kmwcd():
+def test_build_mosaic_skips_ping_when_nav_does_not_cover_it():
+    """The committed .kmwcd/.kmall are independent clips (~2.8 h apart), so the
+    #MWC ping is outside every committed nav span. The coverage guard must skip
+    it (and warn) rather than silently clamp it tens of km away."""
     fx = FIXTURES / "sample_tn447_em124.kmwcd"
     if not fx.exists():
         pytest.skip("kmwcd fixture not present")
-    res = wg.build_mosaic_from_kmall(fx, projector="local", cell_m=25.0, reduce="max")
-    assert res.n_pings == 1
-    assert res.amplitude_db.ndim == 2
-    occupied = np.isfinite(res.amplitude_db)
-    assert occupied.sum() > 0
+    with pytest.warns(UserWarning, match="did not cover"):
+        res = wg.build_mosaic_from_kmall(fx, projector="local", cell_m=25.0)  # default skip
+    assert res.n_uncovered == 1 and res.n_pings == 0
+    assert not np.isfinite(res.amplitude_db).any()
+
+
+def test_build_mosaic_clamp_grids_real_ping():
+    """With on_uncovered='clamp' the (clip-edge) ping is still gridded, so this
+    exercises the full georeference->grid geometry path on real data."""
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    res = wg.build_mosaic_from_kmall(
+        fx, projector="local", cell_m=25.0, reduce="max",
+        auto_companion=False, on_uncovered="clamp",  # its own #SPO, clamped over the 18.8 s clip gap
+    )
+    assert res.n_pings == 1 and res.n_uncovered == 1
+    assert res.amplitude_db.ndim == 2 and np.isfinite(res.amplitude_db).any()
     # Deep abyssal EM124 ping -> the mapped footprint spans hundreds of metres.
     assert res.east_edges[-1] - res.east_edges[0] > 100.0
     assert "EPSG:326" in res.crs_label  # a northern-hemisphere UTM zone
@@ -298,6 +379,7 @@ def test_generate_mosaic_panel(tmp_path):
     fx = FIXTURES / "sample_tn447_em124.kmwcd"
     if not fx.exists():
         pytest.skip("kmwcd fixture not present")
-    made = wg.generate(tmp_path, mwc_files=[fx], projector="local", cell_m=25.0)
+    made = wg.generate(tmp_path, mwc_files=[fx], projector="local", cell_m=25.0,
+                       auto_companion=False, on_uncovered="clamp")
     assert made and all(p.exists() and p.stat().st_size > 0 for p in made)
     assert all("wc_mosaic_" in p.name for p in made)

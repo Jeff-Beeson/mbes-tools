@@ -231,10 +231,21 @@ additive. Recommended order and concrete first steps below.
      resolved for provenance (`mbes_tools.projection`); (3) `GeoMosaic` — a
      streaming sparse-cell accumulator (peak-hold `max` or intensity-`mean`) with
      an optional `depth_band` (e.g. a midwater band for plume mapping) →
-     `finalize()` dense grid + edges + CRS. Verified on the committed EM124
-     `.kmwcd` (single athwartship swath lands perpendicular to the ~287° heading)
-     and multi-ping on the full 237 MB TN447 `.kmwcd` (40-ping mosaic, `#SPO`-COG
-     track). Core numpy+stdlib; matplotlib + pyproj lazy/optional.
+     `finalize()` dense grid + edges + CRS. **Nav source is not assumed to be the
+     WC file** (WC files are often nav-poor — a `.kmwcd` usually has no `#SKM`
+     true heading, a bare `.wcd` has no `P` position at all): `resolve_nav_track`
+     prefers an explicit `--nav`, then the same-stem `.kmall`/`.all` sibling
+     (auto-discovered — where `#SKM`/attitude live), then the WC file's own nav,
+     else a clear error. A **coverage guard** (`on_uncovered="skip"` default)
+     drops pings whose time the nav track does not span rather than letting
+     `np.interp` silently clamp them to a far-away endpoint (reports
+     `n_uncovered`). Verified: committed EM124 `.kmwcd` (single athwartship swath
+     ⟂ the ~287° heading); auto-companion pulls `#SKM` from the sibling `.kmall`;
+     full matched TN447 pair grids 39/40 pings on `#SKM` true heading with the
+     one genuinely-uncovered lead ping correctly skipped. Core numpy+stdlib;
+     matplotlib + pyproj lazy/optional. **Not yet wired:** `.wcd`/`.all` mosaic
+     path (only `.kmwcd`/`.kmall` `#MWC`); `#SKM` roll/pitch wedge correction
+     (heading-only) — a Slice-3 refinement.
 - **Why / trigger:** Samoa hydrothermal-plume / midwater detection and bottom-
   detection QC. Reader validation complete; products are the remaining work.
 
