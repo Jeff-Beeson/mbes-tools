@@ -83,15 +83,32 @@ class NavTrack:
     hdg_deg: np.ndarray
     position_source: str
     heading_source: str
+    # Optional attitude (roll/pitch/heave) — present from #SKM / .all ``A``, else None.
+    t_att: Optional[np.ndarray] = None
+    roll_deg: Optional[np.ndarray] = None
+    pitch_deg: Optional[np.ndarray] = None
+    heave_m: Optional[np.ndarray] = None
+    attitude_source: Optional[str] = None
 
     @classmethod
-    def from_lists(cls, t_pos, lat, lon, t_hdg, hdg_deg, position_source, heading_source):
+    def from_lists(
+        cls, t_pos, lat, lon, t_hdg, hdg_deg, position_source, heading_source,
+        t_att=None, roll_deg=None, pitch_deg=None, heave_m=None, attitude_source=None,
+    ):
         if not t_pos or not t_hdg:
             raise ValueError("NavTrack needs at least one position and one heading sample")
         tp = np.asarray(t_pos, float)
         op = np.argsort(tp, kind="stable")
         th = np.asarray(t_hdg, float)
         oh = np.argsort(th, kind="stable")
+        ta = ro = pi = he = None
+        if t_att is not None and len(t_att):
+            ta = np.asarray(t_att, float)
+            oa = np.argsort(ta, kind="stable")
+            ta = ta[oa]
+            ro = np.asarray(roll_deg, float)[oa]
+            pi = np.asarray(pitch_deg, float)[oa]
+            he = np.asarray(heave_m, float)[oa]
         return cls(
             t_pos=tp[op],
             lat=np.asarray(lat, float)[op],
@@ -100,6 +117,8 @@ class NavTrack:
             hdg_deg=np.asarray(hdg_deg, float)[oh],
             position_source=position_source,
             heading_source=heading_source,
+            t_att=ta, roll_deg=ro, pitch_deg=pi, heave_m=he,
+            attitude_source=attitude_source if ta is not None else None,
         )
 
     def position_at(self, t) -> Tuple[np.ndarray, np.ndarray]:
@@ -114,6 +133,26 @@ class NavTrack:
         s = np.interp(t, self.t_hdg, np.sin(rad))
         c = np.interp(t, self.t_hdg, np.cos(rad))
         return np.rad2deg(np.arctan2(s, c)) % 360.0
+
+    @property
+    def has_attitude(self) -> bool:
+        return self.t_att is not None and self.t_att.size > 0
+
+    def attitude_at(self, t) -> Tuple[float, float, float]:
+        """Interpolated ``(roll_deg, pitch_deg, heave_m)`` at scalar time ``t``.
+
+        Returns ``(0, 0, 0)`` when the track carries no attitude (e.g. built from
+        ``#SPO`` course-over-ground or a ``P``-only ``.all``), so callers can
+        apply it unconditionally. Roll/pitch/heave are small, non-wrapping
+        quantities, so plain linear interpolation is appropriate.
+        """
+        if not self.has_attitude:
+            return 0.0, 0.0, 0.0
+        return (
+            float(np.interp(t, self.t_att, self.roll_deg)),
+            float(np.interp(t, self.t_att, self.pitch_deg)),
+            float(np.interp(t, self.t_att, self.heave_m)),
+        )
 
     def covers(self, t) -> bool:
         """True when ``t`` lies within the position time span (no extrapolation)."""
@@ -139,6 +178,9 @@ def nav_track_from_kmall(paths: Sequence[Path]) -> NavTrack:
     lo: List[float] = []
     th: List[float] = []
     hd: List[float] = []
+    ro: List[float] = []
+    pi: List[float] = []
+    he: List[float] = []
     for p in paths:
         for d in iter_skm_datagrams(Path(p), on_error="skip"):
             for s in d.samples:
@@ -146,8 +188,13 @@ def nav_track_from_kmall(paths: Sequence[Path]) -> NavTrack:
                     t = s.time_sec + s.time_nanosec * 1e-9
                     tp.append(t); la.append(s.latitude_deg); lo.append(s.longitude_deg)
                     th.append(t); hd.append(s.heading_deg)
+                    ro.append(s.roll_deg); pi.append(s.pitch_deg); he.append(s.heave_m)
     if tp:
-        return NavTrack.from_lists(tp, la, lo, th, hd, "#SKM", "#SKM heading")
+        # #SKM KMbinary carries roll/pitch/heave too — attach the attitude track.
+        return NavTrack.from_lists(
+            tp, la, lo, th, hd, "#SKM", "#SKM heading",
+            t_att=list(tp), roll_deg=ro, pitch_deg=pi, heave_m=he, attitude_source="#SKM",
+        )
 
     for p in paths:
         for d in iter_spo_datagrams(Path(p), on_error="skip"):
@@ -163,7 +210,8 @@ def nav_track_from_all(paths: Sequence[Path]) -> NavTrack:
     """Build a :class:`NavTrack` from `.all`/`.wcd` ``P`` position datagrams.
 
     ``P`` carries lat/lon **and** true heading, so it supplies both tracks. Times
-    are seconds-since-midnight from the datagram header (single-day assumption).
+    use the absolute ``date + time`` header clock (:func:`_all_header_time`). If
+    ``A`` attitude datagrams are present, roll/pitch/heave are attached too.
     """
     from mbes_tools.all import iter_position_datagrams
 
@@ -174,10 +222,30 @@ def nav_track_from_all(paths: Sequence[Path]) -> NavTrack:
     for p in paths:
         for d in iter_position_datagrams(Path(p)):
             if -90.0 <= d.latitude_deg <= 90.0 and -180.0 <= d.longitude_deg <= 180.0:
-                t = d.header.time_seconds
+                t = _all_header_time(d.header)
                 tp.append(t); la.append(d.latitude_deg); lo.append(d.longitude_deg)
                 hd.append(d.heading_deg)
-    return NavTrack.from_lists(tp, la, lo, list(tp), hd, "P position", "P heading")
+
+    ta: List[float] = []
+    ro: List[float] = []
+    pi: List[float] = []
+    he: List[float] = []
+    try:
+        from mbes_tools.all import iter_attitude_datagrams
+        for p in paths:
+            for d in iter_attitude_datagrams(Path(p)):
+                base = _all_header_time(d.header)
+                for s in d.samples:
+                    ta.append(base + s.time_ms / 1000.0)
+                    ro.append(s.roll_deg); pi.append(s.pitch_deg); he.append(s.heave_m)
+    except Exception:  # noqa: BLE001 - attitude is an optional refinement
+        ta = []
+
+    return NavTrack.from_lists(
+        tp, la, lo, list(tp), hd, "P position", "P heading",
+        t_att=ta or None, roll_deg=ro, pitch_deg=pi, heave_m=he,
+        attitude_source="A" if ta else None,
+    )
 
 
 def build_nav_track(paths: Sequence[Path]) -> NavTrack:
@@ -256,6 +324,22 @@ def _vessel_en(lon, lat, anchor_lonlat, epsg: int, use_pyproj: bool) -> Tuple[fl
     return float(e), float(n)
 
 
+def _dcm(heading_deg: float, pitch_deg: float, roll_deg: float) -> np.ndarray:
+    """Body→NED direction-cosine matrix ``Rz(H)·Ry(pitch)·Rx(roll)``.
+
+    Body axes are ``(forward, starboard, down)``; the result maps a body vector to
+    ``(north, east, down)``. With pitch=roll=0 this reduces to a pure heading yaw.
+    """
+    h, p, r = math.radians(heading_deg), math.radians(pitch_deg), math.radians(roll_deg)
+    ch, sh = math.cos(h), math.sin(h)
+    cp, sp = math.cos(p), math.sin(p)
+    cr, sr = math.cos(r), math.sin(r)
+    rz = np.array([[ch, -sh, 0.0], [sh, ch, 0.0], [0.0, 0.0, 1.0]])
+    ry = np.array([[cp, 0.0, sp], [0.0, 1.0, 0.0], [-sp, 0.0, cp]])
+    rx = np.array([[1.0, 0.0, 0.0], [0.0, cr, -sr], [0.0, sr, cr]])
+    return rz @ ry @ rx
+
+
 @dataclass
 class GeoSamples:
     """Flattened geo-referenced amplitude samples for one ping (finite only)."""
@@ -270,6 +354,9 @@ class GeoSamples:
     vessel_lat: float
     heading_deg: float
     label: str
+    roll_deg: float = 0.0
+    pitch_deg: float = 0.0
+    heave_m: float = 0.0
 
     def __len__(self) -> int:
         return int(self.easting_m.size)
@@ -286,15 +373,25 @@ def georeference_frame(
     target_crs="auto",
     projector: str = "auto",
     max_depth_m: Optional[float] = None,
+    apply_attitude: bool = True,
+    stabilized_beams: bool = True,
 ) -> GeoSamples:
     """Place a ping's amplitude samples at ``(easting_m, northing_m, depth_m)``.
 
     Geometry: across-track ``X`` (positive = port) and depth ``Z`` come from the
-    Slice-1 wedge (``r = c·k/(2·fs)``). In the vessel frame a sample sits at
-    forward ``x_v`` (0 + lever-arm X), starboard ``y_v`` (``-X`` + lever-arm Y);
-    rotating by heading ``H`` gives east ``x_v·sinH + y_v·cosH`` and north
-    ``x_v·cosH − y_v·sinH``, added to the platform position. Depth is below the
-    transducer (plus the lever-arm Z when ``install`` is given).
+    Slice-1 wedge (``r = c·k/(2·fs)``). Each sample is a body-frame vector
+    ``(forward 0, starboard −X, down Z)``; the transducer **lever arm**
+    ``(fx, fy, fz)`` is a second body vector. Both are rotated into
+    ``(north, east, down)`` and added to the platform position.
+
+    Attitude (``apply_attitude``, from ``nav.attitude_at`` — ``0`` when the track
+    has none): the lever arm is always rotated by the **full** pose
+    ``Rz(H)·Ry(pitch)·Rx(roll)``, and **heave** is added to depth. The beam
+    samples use heading-only rotation when ``stabilized_beams=True`` (the default
+    — Kongsberg ``#MWC``/``k`` ``beamPointAngReVertical`` is already
+    roll/pitch-stabilized at receive, verified empirically: the shoalest beam
+    stays at nadir independent of vessel roll, so re-rotating would
+    double-correct). Set ``stabilized_beams=False`` for raw array-relative angles.
 
     ``projector``: ``"local"`` = ENU metres about ``anchor_lonlat`` (defaults to
     the ping's own position); ``"utm"`` = true UTM via pyproj; ``"auto"`` = UTM
@@ -303,6 +400,7 @@ def georeference_frame(
     """
     lat0, lon0 = (float(v) for v in nav.position_at(ping_time))
     heading = float(nav.heading_at(ping_time))
+    roll, pitch, heave = nav.attitude_at(ping_time) if apply_attitude else (0.0, 0.0, 0.0)
     if anchor_lonlat is None:
         anchor_lonlat = (lon0, lat0)
 
@@ -322,15 +420,21 @@ def georeference_frame(
     finite = np.isfinite(frame.amp_db)
     if max_depth_m is not None:
         finite &= Z <= max_depth_m
-
     xs, zs, amp = X[finite], Z[finite], frame.amp_db[finite]
-    x_v = fx + np.zeros_like(xs)      # forward (along-track ~ 0 for the WC fan)
-    y_v = fy - xs                     # starboard = -across(+port)
-    depth = fz + zs
 
-    h = math.radians(heading)
-    east = e0 + (x_v * math.sin(h) + y_v * math.cos(h))
-    north = n0 + (x_v * math.cos(h) - y_v * math.sin(h))
+    # Lever arm: rigid in the body frame -> rotated by the full vessel pose.
+    dcm_full = _dcm(heading, pitch, roll)
+    lev_n, lev_e, lev_d = dcm_full @ np.array([fx, fy, fz])
+
+    # Beam samples: body vector (forward 0, starboard -X, down Z). Beams are
+    # already vertical-stabilized, so rotate by heading only unless told otherwise.
+    dcm_beam = dcm_full if not stabilized_beams else _dcm(heading, 0.0, 0.0)
+    beam_body = np.vstack([np.zeros_like(xs), -xs, zs])   # (3, N)
+    bn, be, bd = dcm_beam @ beam_body
+
+    north = n0 + lev_n + bn
+    east = e0 + lev_e + be
+    depth = lev_d + bd + heave
 
     return GeoSamples(
         easting_m=east,
@@ -343,6 +447,9 @@ def georeference_frame(
         vessel_lat=lat0,
         heading_deg=heading,
         label=frame.label,
+        roll_deg=roll,
+        pitch_deg=pitch,
+        heave_m=heave,
     )
 
 
@@ -666,6 +773,8 @@ def _accumulate_into(
     on_uncovered: str,
     coverage_tol_s: float,
     limit: Optional[int],
+    apply_attitude: bool = True,
+    stabilized_beams: bool = True,
 ) -> int:
     """Georeference one file's pings into ``mosaic``; return the skipped count.
 
@@ -692,6 +801,7 @@ def _accumulate_into(
         mosaic.add_frame(
             frame, t, nav, anchor_lonlat=anchor_ref[0], install=install,
             projector=projector, max_depth_m=max_depth_m,
+            apply_attitude=apply_attitude, stabilized_beams=stabilized_beams,
         )
     return n_uncovered
 
@@ -713,6 +823,8 @@ def _accumulate_mosaic(
     on_uncovered: str,
     coverage_tol_s: float,
     limit: Optional[int],
+    apply_attitude: bool = True,
+    stabilized_beams: bool = True,
 ) -> GeoMosaicResult:
     """Single-file wrapper over :func:`_accumulate_into` (own mosaic + anchor)."""
     if on_uncovered not in ("skip", "clamp"):
@@ -722,6 +834,7 @@ def _accumulate_mosaic(
         mosaic, [None], items, time_fn, frame_fn, nav, install=install,
         projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
         coverage_tol_s=coverage_tol_s, limit=limit,
+        apply_attitude=apply_attitude, stabilized_beams=stabilized_beams,
     )
     if n_uncovered and on_uncovered == "skip":
         _warn_uncovered(path, kind, n_uncovered, nav)
@@ -745,6 +858,8 @@ def build_mosaic_from_kmall(
     max_depth_m: Optional[float] = None,
     on_uncovered: str = "skip",
     coverage_tol_s: float = 2.0,
+    apply_attitude: bool = True,
+    stabilized_beams: bool = True,
     limit: Optional[int] = None,
 ) -> GeoMosaicResult:
     """Accumulate a mosaic from every ``#MWC`` ping of a `.kmall`/`.kmwcd` file.
@@ -774,6 +889,7 @@ def build_mosaic_from_kmall(
         kind="#MWC", cell_m=cell_m, reduce=reduce, depth_band=depth_band,
         projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
         coverage_tol_s=coverage_tol_s, limit=limit,
+        apply_attitude=apply_attitude, stabilized_beams=stabilized_beams,
     )
 
 
@@ -792,6 +908,8 @@ def build_mosaic_from_wcd(
     max_depth_m: Optional[float] = None,
     on_uncovered: str = "skip",
     coverage_tol_s: float = 2.0,
+    apply_attitude: bool = True,
+    stabilized_beams: bool = True,
     limit: Optional[int] = None,
     allow_incomplete: bool = False,
 ) -> GeoMosaicResult:
@@ -820,6 +938,7 @@ def build_mosaic_from_wcd(
         kind="k", cell_m=cell_m, reduce=reduce, depth_band=depth_band,
         projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
         coverage_tol_s=coverage_tol_s, limit=limit,
+        apply_attitude=apply_attitude, stabilized_beams=stabilized_beams,
     )
 
 
@@ -866,6 +985,8 @@ def build_composite_mosaic(
     max_depth_m: Optional[float] = None,
     on_uncovered: str = "skip",
     coverage_tol_s: float = 2.0,
+    apply_attitude: bool = True,
+    stabilized_beams: bool = True,
     limit: Optional[int] = None,
     allow_incomplete: bool = False,
     verbose: bool = False,
@@ -901,6 +1022,7 @@ def build_composite_mosaic(
             mosaic, anchor_ref, items, time_fn, frame_fn, nav, install=install,
             projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
             coverage_tol_s=coverage_tol_s, limit=limit,
+            apply_attitude=apply_attitude, stabilized_beams=stabilized_beams,
         )
         total_uncovered += n_unc
         if verbose:
@@ -927,6 +1049,8 @@ def generate(
     projector: str = "auto",
     max_depth_m: Optional[float] = None,
     on_uncovered: str = "skip",
+    apply_attitude: bool = True,
+    stabilized_beams: bool = True,
     limit: Optional[int] = None,
 ) -> List[Path]:
     """Build + render mosaic panel(s) from water-column files. Returns PNG paths.
@@ -946,7 +1070,8 @@ def generate(
             files, nav_paths=nav_paths, install_paths=install_paths,
             auto_companion=auto_companion, cell_m=cell_m, reduce=reduce,
             depth_band=depth_band, projector=projector, max_depth_m=max_depth_m,
-            on_uncovered=on_uncovered, limit=limit, verbose=True,
+            on_uncovered=on_uncovered, apply_attitude=apply_attitude,
+            stabilized_beams=stabilized_beams, limit=limit, verbose=True,
         )
         uncov = f", {result.n_uncovered} uncovered-skipped" if result.n_uncovered else ""
         print(f"OK   composite: {result.n_pings} pings, grid {result.amplitude_db.shape}, "
@@ -971,7 +1096,8 @@ def generate(
                 Path(f), nav=nav, install_paths=install_paths, auto_companion=auto_companion,
                 cell_m=cell_m, reduce=reduce, depth_band=depth_band,
                 projector=projector, max_depth_m=max_depth_m,
-                on_uncovered=on_uncovered, limit=limit,
+                on_uncovered=on_uncovered, apply_attitude=apply_attitude,
+                stabilized_beams=stabilized_beams, limit=limit,
             )
         except Exception as exc:  # noqa: BLE001
             print("FAIL", f, "->", type(exc).__name__, str(exc)[:160])
@@ -1028,6 +1154,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     ap.add_argument("--on-uncovered", choices=["skip", "clamp"], default="skip",
                     help="Pings whose time the nav track does not span: skip them (default, "
                          "avoids clamping to a far-away endpoint) or clamp to the nearest fix.")
+    ap.add_argument("--no-attitude", action="store_true",
+                    help="Ignore #SKM/A roll-pitch-heave (heading-only). Default applies them: "
+                         "heave -> depth and the lever arm rotated by the full vessel pose.")
+    ap.add_argument("--unstabilized-beams", action="store_true",
+                    help="Rotate the beam fan by roll/pitch too. ONLY for raw array-relative "
+                         "angles — Kongsberg #MWC/k beamPointAngReVertical is already "
+                         "roll/pitch-stabilized, so this double-corrects normal data.")
     ap.add_argument("--limit", type=int, default=None, help="Only the first N pings per file.")
     args = ap.parse_args(argv)
 
@@ -1036,7 +1169,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         auto_companion=not args.no_auto_companion, combine=args.combine,
         cell_m=args.cell_m, reduce=args.reduce,
         depth_band=_parse_band(args.depth_band), projector=args.projector,
-        max_depth_m=args.max_depth_m, on_uncovered=args.on_uncovered, limit=args.limit,
+        max_depth_m=args.max_depth_m, on_uncovered=args.on_uncovered,
+        apply_attitude=not args.no_attitude, stabilized_beams=not args.unstabilized_beams,
+        limit=args.limit,
     )
     print(f"\nWrote {len(made)} mosaic panel(s) to {args.output}")
 

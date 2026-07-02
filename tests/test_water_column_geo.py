@@ -189,6 +189,81 @@ def test_georeference_utm_without_pyproj_raises():
 
 
 # ---------------------------------------------------------------------------
+# 2b. Attitude (Slice-3): roll/pitch/heave.
+# ---------------------------------------------------------------------------
+
+
+def nav_with_attitude(heading, roll, pitch, heave, lat=0.0, lon=0.0):
+    return wg.NavTrack.from_lists(
+        [0.0, 1.0], [lat, lat], [lon, lon], [0.0, 1.0], [heading, heading], "t", "t",
+        t_att=[0.0, 1.0], roll_deg=[roll, roll], pitch_deg=[pitch, pitch],
+        heave_m=[heave, heave], attitude_source="test",
+    )
+
+
+def test_attitude_at_zero_when_track_has_none():
+    nav = const_nav(0.0, 0.0, 90.0)
+    assert nav.has_attitude is False
+    assert nav.attitude_at(0.5) == (0.0, 0.0, 0.0)
+
+
+def test_attitude_at_interpolates_linearly():
+    nav = wg.NavTrack.from_lists(
+        [0.0, 1.0], [0, 0], [0, 0], [0.0, 1.0], [0, 0], "p", "h",
+        t_att=[0.0, 10.0], roll_deg=[0.0, 10.0], pitch_deg=[0.0, -2.0],
+        heave_m=[0.0, 4.0], attitude_source="x")
+    assert nav.has_attitude
+    r, p, h = nav.attitude_at(5.0)
+    assert r == pytest.approx(5.0) and p == pytest.approx(-1.0) and h == pytest.approx(2.0)
+
+
+def test_dcm_reduces_to_yaw_when_level():
+    d = wg._dcm(30.0, 0.0, 0.0)
+    h = np.radians(30.0)
+    assert np.allclose(d, [[np.cos(h), -np.sin(h), 0], [np.sin(h), np.cos(h), 0], [0, 0, 1]])
+
+
+def test_georeference_stabilized_ignores_roll_but_adds_heave():
+    # Kongsberg beams are vertical-stabilized -> roll must NOT move them; heave -> depth.
+    frame = one_sample_frame(angle_deg=30.0, sample_k=10)  # across +5 (port)
+    nav = nav_with_attitude(heading=0.0, roll=20.0, pitch=0.0, heave=3.0)
+    gs = wg.georeference_frame(frame, 0.5, nav, projector="local")  # stabilized default
+    assert gs.easting_m[0] == pytest.approx(-5.0, abs=1e-6)  # roll did not move the beam
+    assert gs.northing_m[0] == pytest.approx(0.0, abs=1e-6)
+    assert gs.depth_m[0] == pytest.approx(np.cos(np.radians(30.0)) * 10.0 + 3.0)  # + heave
+    assert gs.roll_deg == pytest.approx(20.0) and gs.heave_m == pytest.approx(3.0)
+
+
+def test_georeference_unstabilized_rotates_beam_by_roll():
+    frame = one_sample_frame(angle_deg=30.0, sample_k=10)
+    nav = nav_with_attitude(heading=0.0, roll=20.0, pitch=0.0, heave=0.0)
+    gs = wg.georeference_frame(frame, 0.5, nav, projector="local", stabilized_beams=False)
+    r = np.radians(20.0)
+    stbd, down = -5.0, np.cos(np.radians(30.0)) * 10.0
+    assert gs.easting_m[0] == pytest.approx(stbd * np.cos(r) - down * np.sin(r), abs=1e-6)
+    assert gs.depth_m[0] == pytest.approx(stbd * np.sin(r) + down * np.cos(r), abs=1e-6)
+
+
+def test_georeference_apply_attitude_false_is_heading_only():
+    frame = one_sample_frame(angle_deg=30.0, sample_k=10)
+    nav = nav_with_attitude(heading=0.0, roll=20.0, pitch=5.0, heave=3.0)
+    gs = wg.georeference_frame(frame, 0.5, nav, projector="local", apply_attitude=False)
+    assert gs.easting_m[0] == pytest.approx(-5.0, abs=1e-6)
+    assert gs.depth_m[0] == pytest.approx(np.cos(np.radians(30.0)) * 10.0)  # no heave
+    assert gs.roll_deg == 0.0 and gs.heave_m == 0.0
+
+
+def test_georeference_rotates_lever_arm_by_full_attitude():
+    # Nadir sample + starboard lever (0, 2, 0); roll 90 tips starboard -> down.
+    install = InstallationParameters(raw="", params={"S1X": "0.0", "S1Y": "2.0", "S1Z": "0.0"})
+    frame = one_sample_frame(angle_deg=0.0, sample_k=10)  # nadir, across 0, depth 10
+    nav = nav_with_attitude(heading=0.0, roll=90.0, pitch=0.0, heave=0.0)
+    gs = wg.georeference_frame(frame, 0.5, nav, projector="local", install=install)
+    assert gs.easting_m[0] == pytest.approx(0.0, abs=1e-6)   # starboard lever rolled out of horizontal
+    assert gs.depth_m[0] == pytest.approx(12.0, abs=1e-6)    # 10 (beam) + 2 (lever now points down)
+
+
+# ---------------------------------------------------------------------------
 # 3. GeoMosaic.
 # ---------------------------------------------------------------------------
 
@@ -365,6 +440,22 @@ def test_resolve_nav_prefers_companion_skm_over_wc_spo():
     # Explicit nav_paths wins regardless.
     nav_explicit = wg.resolve_nav_track(kmwcd, nav_paths=[kmall])
     assert nav_explicit.position_source == "#SKM"
+
+
+def test_skm_nav_carries_attitude():
+    """#SKM (unlike #SPO) supplies roll/pitch/heave, so the track has attitude."""
+    kmall = FIXTURES / "sample_tn447_em124.kmall"
+    kmwcd = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not (kmall.exists() and kmwcd.exists()):
+        pytest.skip("EM124 fixture pair not present")
+    nav_skm = wg.nav_track_from_kmall([kmall])
+    assert nav_skm.position_source == "#SKM" and nav_skm.has_attitude
+    assert nav_skm.attitude_source == "#SKM"
+    r, p, h = nav_skm.attitude_at(nav_skm.time_span[0])
+    assert np.isfinite([r, p, h]).all() and abs(r) < 45 and abs(p) < 45
+    # The #SPO fallback (WC file, no #SKM) has no attitude.
+    nav_spo = wg.resolve_nav_track(kmwcd, auto_companion=False)
+    assert not nav_spo.has_attitude
 
 
 def test_resolve_nav_track_errors_on_navless_wcd():

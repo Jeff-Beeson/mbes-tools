@@ -258,9 +258,18 @@ additive. Recommended order and concrete first steps below.
      end-to-end on the real EM304 matched pair H14070/S221 (Cascadia, ~2300 m):
      single-line grids a correct N–S track ribbon with the nadir seafloor stripe,
      ±2.8 km swath (=2300·tan50°), UTM 10N, `#SKM` heading (370/372 pings, 2 lead
-     pings skipped); a 4-line `--combine` composes one coverage map. Core
-     numpy+stdlib; matplotlib + pyproj lazy/optional. **Not yet wired:** `#SKM`
-     roll/pitch wedge correction (heading-only) — a Slice-3 refinement.
+     pings skipped); a 4-line `--combine` composes one coverage map. **Attitude
+     (Slice-3):** `NavTrack` carries optional roll/pitch/heave (from `#SKM` /
+     `.all` `A`); `georeference_frame` rotates the **lever arm** by the full pose
+     `Rz(H)·Ry(pitch)·Rx(roll)` and adds **heave** to depth, while the **beam fan
+     stays heading-only** because Kongsberg `beamPointAngReVertical` is already
+     roll/pitch-stabilized at receive — verified empirically (shoalest-beam-angle
+     vs vessel-roll correlation ≈ 0; on a real 7.76° roll ping the stabilized
+     refinement moves samples ~0.7 m / 0.15 m depth, whereas re-rotating the
+     beams via `stabilized_beams=False` / `--unstabilized-beams` would wrongly
+     shift them ~160 m and up to ~400 m). `--no-attitude` disables it. Core
+     numpy+stdlib; matplotlib + pyproj lazy/optional. D1 water-column products
+     are functionally complete.
 - **Why / trigger:** Samoa hydrothermal-plume / midwater detection and bottom-
   detection QC. Reader validation complete; products are the remaining work.
 
