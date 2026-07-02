@@ -1,6 +1,6 @@
 # mbes-tools — build status & continuation notes
 
-**Snapshot:** 2026-06-30. This is the handoff/status doc for the
+**Snapshot:** 2026-07-02. This is the handoff/status doc for the
 `docs/UPGRADE_PLAN.md` work. Capabilities **A, B, C** (v0.6.0), **D1**
 (water-column reader validation + `wc_diagnostics`, v0.7.0), and **D3**
 (attitude/installation/navigation parsers + `install_params`, v0.8.0) are all
@@ -8,12 +8,12 @@ implemented, verified against real data, and **merged to `main`** (tip
 `5137d2c`, **153 passed / 2 skipped**). **D1 products Slice 1** — vessel-frame
 water-column products (`mbes_tools.water_column`: `.wcd` ping reassembly +
 `(across, depth)` gridding + TVG-residual plume/midwater anomaly pass;
-`mbes-wc-grid`) — is now implemented and verified (v0.9.0, **168 passed / 2
-skipped**) on branch `capability-d1-products/vessel-frame-water-column` (not yet
-merged as of this edit). **Next: D1 products Slice 2** (true geo-referenced
-echogram grids/mosaics using the D3 attitude/nav/install path — plan in
-`docs/WATER_COLUMN_HANDOFF.md` → "Slice 2"). **D2** (GSF) and small follow-ups
-are the remaining backlog below.
+`mbes-wc-grid`) — is implemented and verified (v0.9.0). **D1 products Slice 2** —
+true geo-referenced plan-view mosaics (`mbes_tools.water_column_geo`:
+`NavTrack` + `georeference_frame` + streaming `GeoMosaic`; `mbes-wc-mosaic`) —
+is now implemented and verified (v0.10.0, **190 passed / 2 skipped**) on branch
+`capability-d1-products/vessel-frame-water-column` (not yet merged as of this
+edit). **Next: D2** (GSF) and small follow-ups are the remaining backlog below.
 
 > Read this together with `docs/UPGRADE_PLAN.md` (the spec),
 > `docs/VERIFICATION_DATA.md` (the real-data corpus + how to regenerate the
@@ -214,12 +214,27 @@ additive. Recommended order and concrete first steps below.
      Note `sample_freq_Hz` is heavily decimated on deep CW systems (EM122 ~67 Hz,
      EM124 ~127 Hz → 6–11 m range bins) vs ~30 kHz on EM2040 — physically
      correct, not a bug; the grid derives its default cell size from it per ping.
-  5. ⏭️ **Products Slice 2 (next PR): true geo-referenced echogram
-     grids/mosaics** — compose the vessel-frame wedge with per-sample
-     position/heading/attitude + install lever arms (the D3 path:
-     `iter_spo_datagrams`/`iter_skm_datagrams`, `iter_position_datagrams`/
-     `iter_attitude_datagrams`, `install_params`) → real `(lon, lat, depth)`,
-     binned with `mbes_tools.projection` (auto-UTM; Samoa → EPSG:32702 / 2S).
+  5. ✅ **Products Slice 2 (v0.10.0) — geo-referenced plan-view mosaics:**
+     `mbes_tools.water_column_geo` (`mbes-wc-mosaic`). Composes the vessel-frame
+     wedge with per-sample position/heading (+ install lever arms) — the D3 path
+     — into real projected coordinates, then accumulates many pings into one
+     plan-view mosaic. Pieces: (1) `NavTrack` — sorted position + heading with
+     linear position interp and **circular** (sin/cos) heading interp, built from
+     `.kmall` `#SKM` (true heading) or, for a WC-only `.kmwcd`, `#SPO` position +
+     course-over-ground as a heading proxy (`nav_track_from_kmall`), or `.all`
+     `P` (`nav_track_from_all`); (2) `georeference_frame` → `GeoSamples` at
+     `(easting, northing, depth)`: across-track (+port) → starboard/forward
+     vessel offset (+ transducer lever arm from `install_params`), rotated by
+     heading into E/N, added to the platform position; coordinates are a **local
+     ENU metric frame** anchored at a ref lon/lat (pure numpy, base-env default)
+     or **true UTM** via pyproj when present, with the auto-UTM EPSG always
+     resolved for provenance (`mbes_tools.projection`); (3) `GeoMosaic` — a
+     streaming sparse-cell accumulator (peak-hold `max` or intensity-`mean`) with
+     an optional `depth_band` (e.g. a midwater band for plume mapping) →
+     `finalize()` dense grid + edges + CRS. Verified on the committed EM124
+     `.kmwcd` (single athwartship swath lands perpendicular to the ~287° heading)
+     and multi-ping on the full 237 MB TN447 `.kmwcd` (40-ping mosaic, `#SPO`-COG
+     track). Core numpy+stdlib; matplotlib + pyproj lazy/optional.
 - **Why / trigger:** Samoa hydrothermal-plume / midwater detection and bottom-
   detection QC. Reader validation complete; products are the remaining work.
 

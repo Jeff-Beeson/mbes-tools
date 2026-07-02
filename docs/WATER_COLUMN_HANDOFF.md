@@ -152,17 +152,21 @@ Delivered as `mbes_tools.water_column` (console script `mbes-wc-grid`):
   `sample_tn447_em124.kmwcd`, `sample_em2040_wc_phase1.kmall`,
   `sample_atlantis_em122.wcd`. Review plots: `~/mbes_review_plots/wc_d1_products/`.
 
-**Slice 2 (true georeferencing, uses D3): geo-referenced echogram grid / mosaic.**
-- Compose the vessel-frame wedge with per-sample **position + heading + attitude
-  + install lever arms** to put returns at real `(lon, lat, depth)`, then bin
-  with `mbes_tools.projection` (auto-UTM; Samoa → EPSG:32702 / 2S). The D3 API to
-  use: `kmall.iter_spo_datagrams`/`iter_cpo_datagrams` (or `iter_skm_datagrams`
-  for high-rate pos+attitude) and `all.iter_position_datagrams`/
-  `iter_attitude_datagrams`; install geometry via
-  `install_params.InstallationParameters.transducer_offsets()/mount_angles()`
-  from `iter_iip_datagrams` / `iter_installation_datagrams`. Interpolate
-  attitude/position to each ping time.
-- This is the Samoa-relevant deliverable (plume mapping, midwater context).
+**Slice 2 (true georeferencing, uses D3): geo-referenced echogram grid / mosaic — ✅ DONE (v0.10.0).**
+Implemented as `mbes_tools.water_column_geo` (`mbes-wc-mosaic`); see
+`docs/BUILD_STATUS.md` §D1 item 5 for the shipped design.
+- Composes the vessel-frame wedge with per-sample **position + heading** (+ install
+  lever arms) to put returns at real projected `(easting, northing, depth)`, then
+  bins with `mbes_tools.projection` (auto-UTM; Samoa → EPSG:32702 / 2S). Uses
+  `kmall.iter_skm_datagrams` (true heading) with an `iter_spo_datagrams`
+  course-over-ground fallback for WC-only `.kmwcd`, `all.iter_position_datagrams`,
+  and install geometry via
+  `install_params.InstallationParameters.transducer_offsets()` from
+  `iter_iip_datagrams` / `iter_installation_datagrams`; a `NavTrack` interpolates
+  position (linear) + heading (circular) to each ping time.
+- This is the Samoa-relevant deliverable (plume mapping, midwater context). Not
+  yet used: `#SKM` roll/pitch attitude correction of the wedge (heading-only for
+  now) — a Slice-3 refinement.
 
 **Watch-outs (already documented above):** per-ping `sample_freq_Hz` (deep-CW
 decimation), `.wcd` ping reassembly by `counter`, dual-swath `#MWC` fans,
