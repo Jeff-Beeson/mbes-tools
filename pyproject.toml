@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mbes-tools"
-version = "0.10.0"
+version = "0.11.0"
 description = "Python tools for Kongsberg multibeam I/O, backscatter normalization, and MB-System integration"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -51,6 +51,7 @@ mbes-diagnostics = "mbes_tools.diagnostics:main"
 mbes-wc-diagnostics = "mbes_tools.wc_diagnostics:main"
 mbes-wc-grid = "mbes_tools.water_column:main"
 mbes-wc-mosaic = "mbes_tools.water_column_geo:main"
+mbes-wc-viewer = "mbes_tools.wc_viewer:main"
 
 [project.urls]
 Repository = "https://github.com/Jeff-Beeson/mbes-tools"

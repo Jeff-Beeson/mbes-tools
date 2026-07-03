@@ -4,6 +4,71 @@ All notable changes to `mbes-tools` are documented here. The project follows
 [semantic versioning](https://semver.org/) (currently 0.x — minor versions may
 add features; the public API is kept backward compatible where practical).
 
+## [0.11.0] - 2026-07-02
+
+### Added (Capability D1 products — interactive water-column viewer)
+- **`mbes_tools.wc_viewer`** (console script **`mbes-wc-viewer`**) — the first
+  *interactive* water-column product (the earlier renderers all emit static
+  PNGs). One window, two linked panels over a whole file:
+  - **top** — an along-track **depth stack of the whole file**: every ping's fan
+    collapsed to an amplitude-vs-depth column and laid side by side (x = ping
+    index along track, y = depth), with a movable ping cursor. Collapse modes:
+    `swath-max` (peak-hold across all beams — surfaces any midwater target),
+    `swath-mean` (linear-intensity average), or `nadir` (a clean near-vertical
+    section from beams within a half-angle of vertical).
+  - **bottom** — the selected ping's **navigation/attitude-corrected wedge fan**
+    (across-track x depth), amplitude-coloured, with the bottom detection
+    overlaid; roll/pitch/heave are shown in the title.
+  - **linked & interactive** — click the stack or use ←/→ (and PgUp/PgDn,
+    Home/End) to scrub which ping the fan shows.
+  - Navigation, attitude and geometry are reused verbatim from
+    `water_column_geo` (`resolve_nav_track` companion discovery, the coverage
+    guard with `--on-uncovered skip|clamp`, `NavTrack.attitude_at`): the fan is
+    left **receive-stabilized** (heave + transducer depth added to depth, beams
+    not re-rotated — the Slice-3 physics), so the viewer agrees with the mosaic.
+  - Bounded memory: a whole file is decimated to `--max-pings` (adaptive stride)
+    x `--fan-samples`. `--save PING` renders the linked panels headless (Agg) for
+    review/tests; the interactive window needs a GUI backend (TkAgg/Qt).
+- **Verified against real data:** full EM304 H14070 `.kmwcd` (`0012_*`, S221
+  Cascadia): 370/372 pings (2 lead pings correctly coverage-skipped), companion
+  `#SKM` nav + attitude auto-discovered, the stack traces the ~1900 m seafloor
+  (shoaling along track) with a midwater scattering layer above it, and the fan
+  shows the symmetric ±2.8 km wedge with the bottom-detect overlay. Geometry and
+  the fan->column reductions are unit-tested; the model + static render are
+  gated over the committed EM124 `.kmwcd` / EM122 `.wcd` fixtures.
+
+## [0.10.0] - 2026-07-02
+
+### Added (Capability D1 products — Slices 2–3: geo-referenced mosaics + attitude)
+- **`mbes_tools.water_column_geo`** (console script **`mbes-wc-mosaic`**) — true
+  geo-referenced plan-view water-column products (no new required deps; numpy +
+  stdlib, matplotlib + pyproj lazy/optional):
+  - **`NavTrack`** (linear position interp, circular sin/cos heading interp) with
+    optional roll/pitch/heave, built by `nav_track_from_kmall` (prefers `#SKM`
+    true heading, falls back to `#SPO` course-over-ground) / `nav_track_from_all`
+    (`P`, with `A` attitude).
+  - **`georeference_frame`** — places each sample at `(easting, northing, depth)`
+    reusing the Slice-1 wedge; lever arm from `install.transducer_offsets`,
+    heading rotation, local ENU metres or true UTM (pyproj), auto-UTM EPSG always
+    resolved for provenance.
+  - **`GeoMosaic`** — streaming sparse-cell accumulator (`max` peak-hold or
+    `mean` linear-intensity) with an optional `depth_band` (midwater/plume) ->
+    dense grid.
+  - **Nav-source robustness** — `resolve_nav_track` does not assume the WC file
+    carries usable nav: explicit `--nav` > same-stem `.kmall`/`.all` companion
+    (prefers `#SKM`) > the WC file's own `#SPO`/`P` > a clear error; a coverage
+    guard (`--on-uncovered skip`, default) drops pings outside the nav span
+    instead of clamping them to a track endpoint.
+  - **`.wcd`/`.all` path** and a multi-line **`--combine`** composite (many files
+    into one shared-anchor, one-CRS mosaic); midwater/plume product via
+    `--depth-band LO:HI --reduce mean`.
+  - **Vessel attitude (Slice 3)** — the lever arm is rotated by the full pose
+    `Rz(H)·Ry(pitch)·Rx(roll)` and heave added to depth, but the **beam fan is
+    left roll/pitch-stabilized** (Kongsberg `beamPointAngReVertical` is already
+    stabilized at receive — re-rotating double-corrects; `--unstabilized-beams`
+    opts out). Verified on real EM124/EM122/EM304 data (matched `.kmwcd`/`.kmall`
+    pairs, `.wcd` reassembly, TN447 + H14070).
+
 ## [0.9.0] - 2026-06-30
 
 ### Added (Capability D1 products — Slice 1: vessel-frame water column)

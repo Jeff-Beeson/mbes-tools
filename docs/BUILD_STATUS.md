@@ -15,11 +15,15 @@ robust companion-nav resolution + coverage guard, `.wcd`/`.all` support, a
 multi-line `--combine` composite, the `--depth-band` midwater/plume product, and
 vessel attitude (roll/pitch/heave, with the beam fan correctly left
 roll-stabilized) — are implemented and verified against real EM124/EM122/EM304
-data (v0.10.0, **212 passed / 2 skipped**). **D1 water-column products are
+data (v0.10.0). An **interactive viewer** (`mbes_tools.wc_viewer`;
+`mbes-wc-viewer`) then adds a whole-file along-track **depth stack** linked by a
+ping cursor to that ping's nav/attitude-corrected **wedge fan** — reusing the
+`water_column_geo` nav/attitude/coverage-guard so it agrees with the mosaic
+(v0.11.0, **224 passed / 2 skipped**). **D1 water-column products are
 functionally complete.** Work is on branch
-`capability-d1-products/vessel-frame-water-column` (pushed to origin, tip
-`88cb0f4`; **PR not yet opened** against `main`). **Next: D2** (native GSF
-reader) and small follow-ups are the remaining backlog below.
+`capability-d1-products/vessel-frame-water-column` (pushed to origin; **PR #10
+open** against `main`). **Next: D2** (native GSF reader) and small follow-ups
+are the remaining backlog below.
 
 > Read this together with `docs/UPGRADE_PLAN.md` (the spec),
 > `docs/VERIFICATION_DATA.md` (the real-data corpus + how to regenerate the

@@ -164,9 +164,26 @@ Implemented as `mbes_tools.water_column_geo` (`mbes-wc-mosaic`); see
   `install_params.InstallationParameters.transducer_offsets()` from
   `iter_iip_datagrams` / `iter_installation_datagrams`; a `NavTrack` interpolates
   position (linear) + heading (circular) to each ping time.
-- This is the Samoa-relevant deliverable (plume mapping, midwater context). Not
-  yet used: `#SKM` roll/pitch attitude correction of the wedge (heading-only for
-  now) — a Slice-3 refinement.
+- This is the Samoa-relevant deliverable (plume mapping, midwater context).
+
+**Slice 3 (attitude): roll/pitch/heave in georeferencing — ✅ DONE (v0.10.0).**
+`NavTrack.attitude_at` (from `#SKM` / `.all` `A`); `georeference_frame` rotates
+the lever arm by the full pose `Rz(H)·Ry(pitch)·Rx(roll)` and adds heave to
+depth, but leaves the beam fan **receive-stabilized** (Kongsberg
+`beamPointAngReVertical` is already roll/pitch-stabilized — re-rotating
+double-corrects; verified on EM304 H14070). `--unstabilized-beams` opts out.
+
+**Interactive viewer — ✅ DONE (v0.11.0).** `mbes_tools.wc_viewer`
+(`mbes-wc-viewer`): the first *interactive* WC product. One window, two linked
+panels — a whole-file along-track **depth stack** (each ping's fan collapsed to
+an amplitude-vs-depth column: `swath-max` / `swath-mean` / `nadir`) with a
+movable ping cursor, and the selected ping's **nav/attitude-corrected wedge fan**
+(bottom-detect overlay, roll/pitch/heave in the title). Click the stack or
+←/→/PgUp/PgDn/Home/End to scrub. Reuses `water_column_geo` nav/attitude +
+coverage guard (`--on-uncovered`), bounds memory via `--max-pings` (adaptive
+stride) × `--fan-samples`, and `--save PING` renders the linked panels headless.
+Verified on real EM304 H14070 (370/372 pings, `#SKM` attitude); review PNGs
+`~/mbes_review_plots/wc_d1_products/wc_viewer_0012_em304_{swathmax,nadir}.png`.
 
 **Watch-outs (already documented above):** per-ping `sample_freq_Hz` (deep-CW
 decimation), `.wcd` ping reassembly by `counter`, dual-swath `#MWC` fans,
