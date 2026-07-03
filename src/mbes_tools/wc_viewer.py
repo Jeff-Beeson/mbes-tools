@@ -723,11 +723,36 @@ class WaterColumnViewer:
             props=dict(alpha=0.2, facecolor="red"),
         )
 
+    def _raise_window(self) -> None:
+        """Best-effort: bring the window on-screen and to the front.
+
+        WSLg (and some window managers) can open a new window off-screen or behind
+        others — the taskbar shows an icon but nothing appears. Nudge it to a
+        visible position and briefly mark it top-most. Backend-agnostic and fully
+        guarded so it is a no-op on headless / unknown backends.
+        """
+        try:
+            win = self.fig.canvas.manager.window
+        except Exception:
+            return
+        try:
+            if hasattr(win, "wm_attributes"):  # Tk
+                win.deiconify()
+                win.geometry("+60+60")  # force on-screen (position only, keeps size)
+                win.lift()
+                win.wm_attributes("-topmost", True)
+                win.after(600, lambda: win.wm_attributes("-topmost", False))
+            elif hasattr(win, "raise_"):  # Qt
+                win.showNormal(); win.raise_(); win.activateWindow()
+        except Exception:
+            pass
+
     def show(self) -> None:
         """Launch the interactive window (needs a GUI backend)."""
         self._build_controls()
         self.fig.canvas.mpl_connect("button_press_event", self._on_click)
         self.fig.canvas.mpl_connect("key_press_event", self._on_key)
+        self._raise_window()
         self.plt.show()
 
 
