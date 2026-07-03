@@ -4,6 +4,37 @@ All notable changes to `mbes-tools` are documented here. The project follows
 [semantic versioning](https://semver.org/) (currently 0.x — minor versions may
 add features; the public API is kept backward compatible where practical).
 
+## [0.12.0] - 2026-07-02
+
+### Added (water-column viewer — interactive display controls)
+- **`mbes-wc-viewer` gained operator controls** on top of the linked
+  stack + fan (all live; also settable up front from the CLI):
+  - **Shared colour scale + whole-file amplitude histogram** — a `RangeSlider`
+    beneath a histogram of the file's amplitudes sets one min/max shared by both
+    panels (`--clim LO HI`); the histogram shows the distribution with the
+    current min/max as red guide lines.
+  - **Clamp/cut toggle** (`--clip {clamp,cut}`) — out-of-range samples either show
+    the colormap end colours (clamp, default) or are cut out and rendered
+    transparent (via the colormap's under/over), so weak water column can be
+    dropped to isolate the seafloor and strong scatterers.
+  - **Drag-a-band swath selection** — a `SpanSelector` on the fan: drag an
+    across-track band and the along-track stack rebuilds from only that band
+    (`PingView.depth_column(..., across_window=...)` +
+    `WaterColumnFileView.rebuild_stack`), shown as a shaded overlay on the fan;
+    double-click or `r` resets to the full swath. `--swath LO HI` sets it up front.
+  - **Cursor lat/lon readout** — a status line driven by `motion_notify_event`:
+    over the fan, the geographic position of the cursor's across-track point for
+    the current ping (`PingView.across_to_lonlat`, equirectangular from the ping
+    position + heading); over the stack, the nadir (vessel) position of the ping
+    under the cursor.
+- The interactive widgets live only in `WaterColumnViewer.show()`, so the
+  headless `render_static` path and its tests are unaffected; every control's
+  effect is a small method (`_apply_clim` / `_set_clip` / `_on_swath` /
+  `_status_over_*`) unit-tested on an Agg viewer plus pure-geometry tests for
+  `across_to_lonlat` and the `across_window` collapse. Verified on real EM304
+  H14070 `.kmwcd` (clim + cut isolate the seafloor/midwater; a ±400 m swath band
+  gives a clean near-nadir section). `231 passed, 2 skipped`.
+
 ## [0.11.0] - 2026-07-02
 
 ### Added (Capability D1 products — interactive water-column viewer)

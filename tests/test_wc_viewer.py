@@ -98,6 +98,31 @@ def test_max_bottom_depth_from_detection():
     assert np.isclose(p.max_bottom_depth(), 200.0 * np.cos(np.deg2rad(30)))
 
 
+def test_across_to_lonlat_nadir_is_vessel_and_port_rotates_by_heading():
+    p = make_ping([0.0], [[np.nan, 1.0]])
+    p.lat, p.lon = 45.0, -125.0
+    # across 0 -> the vessel position exactly.
+    assert p.across_to_lonlat(0.0) == (p.lon, p.lat)
+    # Heading east (90): +port (left) faces north -> lat increases, lon ~unchanged.
+    p.heading_deg = 90.0
+    lon, lat = p.across_to_lonlat(1000.0)
+    assert lat > 45.0 and abs(lon - (-125.0)) < 1e-6
+    assert np.isclose(lat - 45.0, np.degrees(1000.0 / wv._WGS84_A))
+    # Heading north (0): +port faces west -> lon decreases, lat ~unchanged.
+    p.heading_deg = 0.0
+    lon, lat = p.across_to_lonlat(1000.0)
+    assert lon < -125.0 and abs(lat - 45.0) < 1e-6
+
+
+def test_depth_column_across_window_excludes_off_band_samples():
+    # Nadir beam (across 0, 2 dB) and a bright 40 deg beam (across ~1.29, 50 dB).
+    p = make_ping([0.0, 40.0], [[np.nan, np.nan, 2.0], [np.nan, np.nan, 50.0]])
+    edges = np.linspace(0.0, 4.0, 5)
+    col = p.depth_column(edges, "swath-max", 3.0, across_window=(-0.5, 0.5))
+    # Only the nadir sample is inside the band, so the bright 50 dB is excluded.
+    assert np.isclose(np.nanmax(col), 2.0)
+
+
 # ---------------------------------------------------------------------------
 # Whole-file model validation.
 # ---------------------------------------------------------------------------
@@ -204,4 +229,100 @@ def test_viewer_select_moves_cursor_and_updates(tmp_path):
     assert viewer.current == 2 and viewer.cursor.get_xdata()[0] == 2
     viewer.select(999)  # clamped to last ping
     assert viewer.current == view.n_pings - 1
+    plt.close(viewer.fig)
+
+
+def _real_kmwcd_view():
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    return wv.WaterColumnFileView.from_file(fx, on_uncovered="clamp")
+
+
+def test_amp_sample_populated_and_rebuild_stack_narrows_with_window():
+    view = _real_kmwcd_view()
+    assert view.amp_sample.size > 0 and np.isfinite(view.amp_sample).all()
+    full = np.count_nonzero(np.isfinite(view.stack))
+    out = view.rebuild_stack(across_window=(-200.0, 200.0))
+    assert out.shape == (600, view.n_pings) and out is view.stack
+    narrow = np.count_nonzero(np.isfinite(view.stack))
+    # A near-nadir band fills no more depth bins than the whole swath.
+    assert 0 < narrow <= full
+
+
+@pytest.mark.skipif(not _HAS_MPL, reason="needs matplotlib")
+def test_apply_clim_sets_both_panels_and_hist_guides():
+    view = _real_kmwcd_view()
+    plt = wv._plt(interactive=False)
+    viewer = wv.WaterColumnViewer(view, plt)
+    viewer._apply_clim(-20.0, 10.0)
+    assert viewer.im.get_clim() == (-20.0, 10.0)
+    assert viewer.sc.get_clim() == (-20.0, 10.0)
+    assert viewer._hist_lo.get_xdata()[0] == -20.0 and viewer._hist_hi.get_xdata()[0] == 10.0
+    viewer._apply_clim(5.0, 5.0)  # invalid (vmax<=vmin) -> ignored
+    assert viewer.im.get_clim() == (-20.0, 10.0)
+    plt.close(viewer.fig)
+
+
+@pytest.mark.skipif(not _HAS_MPL, reason="needs matplotlib")
+def test_set_clip_toggles_transparency():
+    view = _real_kmwcd_view()
+    plt = wv._plt(interactive=False)
+    viewer = wv.WaterColumnViewer(view, plt, clip_mode="clamp")
+    assert viewer._cmap.get_under()[3] == 1.0  # clamp -> opaque end colour
+    viewer._set_clip("cut (transparent)")
+    assert viewer._clip_mode == "cut"
+    assert viewer._cmap.get_under()[3] == 0.0 and viewer._cmap.get_over()[3] == 0.0
+    assert viewer.im.cmap.get_under()[3] == 0.0  # propagated to the artist
+    viewer._set_clip("clamp (end colours)")
+    assert viewer._clip_mode == "clamp" and viewer._cmap.get_under()[3] == 1.0
+    plt.close(viewer.fig)
+
+
+@pytest.mark.skipif(not _HAS_MPL, reason="needs matplotlib")
+def test_on_swath_rebuilds_stack_and_reset_restores():
+    view = _real_kmwcd_view()
+    plt = wv._plt(interactive=False)
+    viewer = wv.WaterColumnViewer(view, plt)
+    before = view.stack.copy()
+    viewer._on_swath(-500.0, 500.0)
+    assert viewer._across_window == (-500.0, 500.0)
+    both = np.isfinite(view.stack) & np.isfinite(before)
+    # Peak-hold over a sub-swath is <= the full swath, and something changed.
+    assert both.any() and np.all(view.stack[both] <= before[both] + 1e-3)
+    assert not np.allclose(view.stack[both], before[both])
+    assert "swath [" in viewer.ax_stack.get_title()  # band annotation, not the mode name
+    viewer._on_swath(10.0, 10.2)  # sub-1m drag treated as a click -> no change
+    assert viewer._across_window == (-500.0, 500.0)
+    viewer._reset_swath()
+    assert viewer._across_window is None and "swath [" not in viewer.ax_stack.get_title()
+    plt.close(viewer.fig)
+
+
+@pytest.mark.skipif(not _HAS_MPL, reason="needs matplotlib")
+def test_build_controls_constructs_widgets_and_slider_drives_clim():
+    from matplotlib.widgets import RadioButtons, RangeSlider, SpanSelector
+
+    view = _real_kmwcd_view()
+    plt = wv._plt(interactive=False)
+    viewer = wv.WaterColumnViewer(view, plt)
+    viewer._build_controls()  # the interactive-widget path, headless
+    assert isinstance(viewer._clim_slider, RangeSlider)
+    assert isinstance(viewer._clip_radio, RadioButtons)
+    assert isinstance(viewer._span, SpanSelector)
+    viewer._clim_slider.set_val((-30.0, 5.0))  # -> on_changed -> _apply_clim
+    assert viewer.im.get_clim() == (-30.0, 5.0)
+    plt.close(viewer.fig)
+
+
+@pytest.mark.skipif(not _HAS_MPL, reason="needs matplotlib")
+def test_status_readouts_over_fan_and_stack():
+    view = _real_kmwcd_view()
+    plt = wv._plt(interactive=False)
+    viewer = wv.WaterColumnViewer(view, plt)
+    p = view.pings[0]
+    fan = viewer._status_over_fan(0.0, 1500.0)  # across 0 -> vessel lon/lat
+    assert f"{p.lat:+.5f}" in fan and f"{p.lon:+.5f}" in fan and "depth" in fan
+    stk = viewer._status_over_stack(0, 1200.0)
+    assert "ping" in stk and f"{p.lat:+.5f}" in stk
     plt.close(viewer.fig)
