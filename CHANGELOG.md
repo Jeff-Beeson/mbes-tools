@@ -33,7 +33,19 @@ add features; the public API is kept backward compatible where practical).
   `_status_over_*`) unit-tested on an Agg viewer plus pure-geometry tests for
   `across_to_lonlat` and the `across_window` collapse. Verified on real EM304
   H14070 `.kmwcd` (clim + cut isolate the seafloor/midwater; a ±400 m swath band
-  gives a clean near-nadir section). `231 passed, 2 skipped`.
+  gives a clean near-nadir section). `232 passed, 2 skipped`.
+
+### Fixed (water-column viewer)
+- **Window freeze on mouse move** — the lat/lon readout was wired to
+  `motion_notify_event` and called `draw_idle()` on every move, forcing a full
+  redraw of the ~200k-point fan on each event (which, together with the blitting
+  `SpanSelector`, locked the window up). Moved the readout to matplotlib's
+  built-in `Axes.format_coord` (toolbar coordinate area, no per-motion redraw)
+  and capped the fan scatter at ~60k points (display-only decimation) so
+  ping-scrub and slider redraws stay snappy.
+- **Off-screen / hidden window on WSLg** — `show()` now nudges the window to a
+  visible position and briefly raises it to the front (backend-agnostic, guarded,
+  a no-op headless).
 
 ## [0.11.0] - 2026-07-02
 

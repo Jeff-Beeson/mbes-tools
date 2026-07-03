@@ -19,8 +19,10 @@ data (v0.10.0). An **interactive viewer** (`mbes_tools.wc_viewer`;
 `mbes-wc-viewer`) then adds a whole-file along-track **depth stack** linked by a
 ping cursor to that ping's nav/attitude-corrected **wedge fan** — reusing the
 `water_column_geo` nav/attitude/coverage-guard so it agrees with the mosaic
-(v0.11.0, **224 passed / 2 skipped**). **D1 water-column products are
-functionally complete.** Work is on branch
+(v0.11.0) — and then gains **live operator controls** (shared colour-scale +
+whole-file amplitude histogram, clamp/cut clip toggle, drag-a-band swath
+selection, cursor lat/lon readout; v0.12.0, **232 passed / 2 skipped**). **D1
+water-column products are functionally complete.** Work is on branch
 `capability-d1-products/vessel-frame-water-column` (pushed to origin; **PR #10
 open** against `main`). **Next: D2** (native GSF reader) and small follow-ups
 are the remaining backlog below.
@@ -124,8 +126,10 @@ a `CHANGELOG.md` entry per capability.
 ---
 
 ## 3. Build / test status
-- **`python -m pytest -q` → 153 passed, 2 skipped** at the tip of
-  `capability-d3/attitude-installation` (142/2 at D1, 131/2 on merged `main`).
+- **`python -m pytest -q` → 232 passed, 2 skipped** at the tip of the current
+  D1-products branch `capability-d1-products/vessel-frame-water-column`
+  (v0.12.0). Merged `main` is **153/2** (tip of
+  `capability-d3/attitude-installation`; 142/2 at D1, 131/2 on the earlier `main`).
 - The 2 skips are the gated cross-model test and the gated diagnostics render
   test; run them with `MBES_TEST_DATA_ROOT=<dir>` (+ matplotlib for the render).
   The gated real `phase_flag`-2 water-column test runs when its (large, external)

@@ -6,15 +6,20 @@ the next phase. For the full per-capability status see `docs/BUILD_STATUS.md`
 (canonical), the API view in `docs/IMPLEMENTATION_SUMMARY.md`, the spec in
 `docs/UPGRADE_PLAN.md`, and the real-data corpus in `docs/VERIFICATION_DATA.md`.
 
-**As of:** 2026-06-30 · **Version:** 0.9.0 · **`main`** tip `5137d2c` (D1+D3
-merged). `pytest -q` = 168 passed, 2 skipped on the D1-products Slice 1 branch
-`capability-d1-products/vessel-frame-water-column` (153/2 on `main`). D1
-(water-column readers + `wc_diagnostics`) **and** D3 (attitude/installation/
-navigation parsers + `install_params`) are merged to `main` — so the position/
-attitude/install path that true geo-referenced products need is available.
-**Slice 1 (vessel-frame products) is now DONE** — `mbes_tools.water_column` +
-`mbes-wc-grid` (see "D1 products — start here" below). **Next up: Slice 2**
-(true geo-referenced grids/mosaics, uses the D3 path).
+**As of:** 2026-07-03 · **Version:** 0.12.0 · branch
+`capability-d1-products/vessel-frame-water-column` tip `37d755c` (**PR #10** open
+against `main`; `main` tip `5137d2c` = D1+D3 merged). `pytest -q` = **232 passed,
+2 skipped** (153/2 on `main`). D1 (water-column readers + `wc_diagnostics`)
+**and** D3 (attitude/installation/navigation parsers + `install_params`) are
+merged to `main` — so the position/attitude/install path that true
+geo-referenced products need is available. **All D1 product slices are now
+DONE:** vessel-frame grid (Slice 1, `mbes_tools.water_column` / `mbes-wc-grid`),
+geo-referenced plan-view mosaic (Slice 2, `mbes_tools.water_column_geo` /
+`mbes-wc-mosaic`), roll/pitch/heave georeferencing (Slice 3), and the
+interactive viewer with live display controls (`mbes_tools.wc_viewer` /
+`mbes-wc-viewer`, v0.11.0→v0.12.0) — see "D1 products — start here" below. **D1
+water-column products are functionally complete; the next capability is D2
+(native GSF reader).**
 
 ## What D1 delivered
 
@@ -173,7 +178,7 @@ depth, but leaves the beam fan **receive-stabilized** (Kongsberg
 `beamPointAngReVertical` is already roll/pitch-stabilized — re-rotating
 double-corrects; verified on EM304 H14070). `--unstabilized-beams` opts out.
 
-**Interactive viewer — ✅ DONE (v0.11.0).** `mbes_tools.wc_viewer`
+**Interactive viewer — ✅ DONE (v0.11.0; live display controls v0.12.0).** `mbes_tools.wc_viewer`
 (`mbes-wc-viewer`): the first *interactive* WC product. One window, two linked
 panels — a whole-file along-track **depth stack** (each ping's fan collapsed to
 an amplitude-vs-depth column: `swath-max` / `swath-mean` / `nadir`) with a
@@ -184,6 +189,12 @@ coverage guard (`--on-uncovered`), bounds memory via `--max-pings` (adaptive
 stride) × `--fan-samples`, and `--save PING` renders the linked panels headless.
 Verified on real EM304 H14070 (370/372 pings, `#SKM` attitude); review PNGs
 `~/mbes_review_plots/wc_d1_products/wc_viewer_0012_em304_{swathmax,nadir}.png`.
+**v0.12.0 added live display controls** — a shared colour-scale `RangeSlider`
+under a whole-file amplitude histogram (`--clim`), a clamp/cut clip toggle
+(`--clip`, to drop weak water column and isolate the seafloor/scatterers), a
+drag-a-band across-track **swath** selection that rebuilds the along-track stack
+(`--swath`), and a cursor lat/lon readout — plus two robustness fixes (window
+freeze on mouse-move redraw; off-screen/hidden window on WSLg).
 
 **Watch-outs (already documented above):** per-ping `sample_freq_Hz` (deep-CW
 decimation), `.wcd` ping reassembly by `counter`, dual-swath `#MWC` fans,
