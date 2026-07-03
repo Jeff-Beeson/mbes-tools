@@ -4,6 +4,31 @@ All notable changes to `mbes-tools` are documented here. The project follows
 [semantic versioning](https://semver.org/) (currently 0.x — minor versions may
 add features; the public API is kept backward compatible where practical).
 
+## [0.13.0] - 2026-07-03
+
+### Added (water-column mosaic — georeferenced raster export)
+- **`mbes-wc-mosaic` can now write the plan-view mosaic as a raster**, not just a
+  PNG panel:
+  - **`--geotiff`** — a single-band float32 **GeoTIFF** (amplitude dB, `NaN`
+    nodata, north-up) with the real projected CRS embedded. Requires
+    `--projector utm` (so a true EPSG is resolved) + rasterio
+    (`pip install 'mbes-tools[geo]'`); `export_geotiff` raises a clear error in the
+    local-ENU frame or when rasterio is absent.
+  - **`--asc`** — an **ESRI ASCII Grid** (`.asc`) plus a `.prj` WKT sidecar when a
+    projected EPSG is available. Pure numpy + stdlib, so it works in the base env
+    and is GDAL-convertible to GeoTIFF.
+- **EPSG is now threaded through** `GeoSamples` → `GeoMosaic` → `GeoMosaicResult`
+  (`epsg` = the real projected code in `utm` mode, `None` for local ENU), so the
+  writers embed the correct CRS instead of re-parsing the `crs_label` string.
+- New optional extra **`geo = ["pyproj", "rasterio"]`**; both are lazy-imported so
+  the core stays numpy + stdlib.
+- **Verified end-to-end** on the committed EM124 `.kmwcd`: `--projector utm
+  --geotiff --asc` writes a UTM-52N GeoTIFF (EPSG:32652, 25 m cells) whose
+  filled-cell centroid round-trips to 126.974°E / 6.904°N — the fixture's true
+  position — plus a matching `.asc`/`.prj`. New unit tests cover north-up
+  orientation, the ASCII header, EPSG threading, the projected-CRS guard, and a
+  gated GeoTIFF round-trip (rasterio).
+
 ## [0.12.0] - 2026-07-02
 
 ### Added (water-column viewer — interactive display controls)

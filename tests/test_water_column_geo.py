@@ -57,7 +57,7 @@ def const_nav(lat, lon, heading_deg):
     )
 
 
-def geo_samples(easting, northing, depth, amp):
+def geo_samples(easting, northing, depth, amp, epsg=None):
     """A GeoSamples bundle built directly from coordinate arrays."""
     return wg.GeoSamples(
         easting_m=np.asarray(easting, float),
@@ -70,6 +70,7 @@ def geo_samples(easting, northing, depth, amp):
         vessel_lat=0.0,
         heading_deg=0.0,
         label="synthetic",
+        epsg=epsg,
     )
 
 
@@ -570,3 +571,104 @@ def test_generate_combine_makes_single_composite_panel(tmp_path):
                        cell_m=25.0, auto_companion=False, on_uncovered="clamp")
     assert len(made) == 1 and "composite" in made[0].name
     assert made[0].exists() and made[0].stat().st_size > 0
+
+
+# ---------------------------------------------------------------------------
+# 5. Raster export: EPSG threading, ESRI ASCII (numpy-only), GeoTIFF (rasterio).
+# ---------------------------------------------------------------------------
+
+_HAS_RASTERIO = importlib.util.find_spec("rasterio") is not None
+_HAS_PYPROJ = wg._pyproj_available()
+
+
+def _gap_mosaic(epsg=None):
+    """2x2 mosaic with cells (0,0)=-30 (south-west) and (1,1)=-10 (north-east);
+    the other two cells stay NaN. cell_m=10 -> edges [0,10,20]."""
+    m = wg.GeoMosaic(cell_m=10.0, reduce="max")
+    m.add(geo_samples([5.0, 15.0], [5.0, 15.0], [100.0, 100.0], [-30.0, -10.0], epsg=epsg))
+    return m.finalize()
+
+
+def test_epsg_threads_into_result_from_geosamples():
+    # GeoMosaic captures epsg from the first ping; finalize propagates it.
+    assert _gap_mosaic(epsg=32610).epsg == 32610
+    assert _gap_mosaic(epsg=None).epsg is None
+
+
+@pytest.mark.skipif(not _HAS_PYPROJ, reason="needs pyproj")
+def test_georeference_utm_sets_epsg_but_local_does_not():
+    frame = one_sample_frame(angle_deg=0.0, sample_k=5)
+    nav = const_nav(6.90354, 126.97404, 0.0)  # UTM 52N
+    assert wg.georeference_frame(frame, 0.0, nav, projector="utm").epsg == 32652
+    assert wg.georeference_frame(frame, 0.0, nav, projector="local").epsg is None
+
+
+def test_export_ascii_grid_orientation_and_header(tmp_path):
+    res = _gap_mosaic()
+    path = wg.export_ascii_grid(res, tmp_path / "wc_mosaic_x")
+    assert path.suffix == ".asc" and path.exists()
+
+    lines = path.read_text().splitlines()
+    hdr = {p.split()[0]: p.split()[1] for p in lines[:6]}
+    assert hdr["ncols"] == "2" and hdr["nrows"] == "2"
+    assert float(hdr["xllcorner"]) == pytest.approx(0.0)
+    assert float(hdr["yllcorner"]) == pytest.approx(0.0)
+    assert float(hdr["cellsize"]) == pytest.approx(10.0)
+    nodata = float(hdr["NODATA_value"])
+
+    body = np.loadtxt(tmp_path / "wc_mosaic_x.asc", skiprows=6)
+    # North-up: row 0 is the northernmost. NE cell (-10) is top-right; SW cell
+    # (-30) is bottom-left; the two off-diagonal cells are NODATA.
+    assert body[0, 1] == pytest.approx(-10.0)
+    assert body[1, 0] == pytest.approx(-30.0)
+    assert body[0, 0] == pytest.approx(nodata)
+    assert body[1, 1] == pytest.approx(nodata)
+
+
+def test_export_ascii_grid_prj_only_when_projected(tmp_path):
+    # Local frame (epsg None) -> no .prj sidecar.
+    wg.export_ascii_grid(_gap_mosaic(epsg=None), tmp_path / "local")
+    assert not (tmp_path / "local.prj").exists()
+    if _HAS_PYPROJ:
+        wg.export_ascii_grid(_gap_mosaic(epsg=32610), tmp_path / "utm")
+        assert (tmp_path / "utm.prj").exists()
+        assert "32610" in (tmp_path / "utm.prj").read_text() or "UTM zone 10N" in (tmp_path / "utm.prj").read_text()
+
+
+def test_export_geotiff_requires_projected_crs(tmp_path):
+    # epsg=None (local frame) -> refuses before touching rasterio.
+    with pytest.raises(RuntimeError, match="projected CRS"):
+        wg.export_geotiff(_gap_mosaic(epsg=None), tmp_path / "local")
+
+
+@pytest.mark.skipif(not _HAS_RASTERIO, reason="needs rasterio")
+def test_export_geotiff_roundtrip(tmp_path):
+    import rasterio
+    res = _gap_mosaic(epsg=32610)
+    path = wg.export_geotiff(res, tmp_path / "wc_mosaic_x")
+    assert path.suffix == ".tif" and path.exists()
+    with rasterio.open(path) as ds:
+        assert ds.crs.to_epsg() == 32610
+        assert ds.width == 2 and ds.height == 2 and ds.count == 1
+        # Bounds match the mosaic edges.
+        assert ds.bounds.left == pytest.approx(0.0)
+        assert ds.bounds.bottom == pytest.approx(0.0)
+        assert ds.bounds.right == pytest.approx(20.0)
+        assert ds.bounds.top == pytest.approx(20.0)
+        band = ds.read(1)
+        # North-up (row 0 = north): NE cell (-10) top-right, SW cell (-30) bottom-left.
+        assert band[0, 1] == pytest.approx(-10.0)
+        assert band[1, 0] == pytest.approx(-30.0)
+        assert np.isnan(band[0, 0]) and np.isnan(band[1, 1])
+
+
+def test_generate_writes_asc_alongside(tmp_path):
+    # The .asc writer is numpy-only, so this runs even without matplotlib
+    # (the PNG panel fails-soft; the raster is still written).
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    made = wg.generate(tmp_path, mwc_files=[fx], projector="local", cell_m=25.0,
+                       auto_companion=False, on_uncovered="clamp", write_asc=True)
+    ascs = [p for p in made if p.suffix == ".asc"]
+    assert ascs and ascs[0].exists() and ascs[0].stat().st_size > 0
