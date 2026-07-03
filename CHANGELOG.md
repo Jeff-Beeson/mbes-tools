@@ -4,6 +4,153 @@ All notable changes to `mbes-tools` are documented here. The project follows
 [semantic versioning](https://semver.org/) (currently 0.x — minor versions may
 add features; the public API is kept backward compatible where practical).
 
+## [0.12.0] - 2026-07-02
+
+### Added (water-column viewer — interactive display controls)
+- **`mbes-wc-viewer` gained operator controls** on top of the linked
+  stack + fan (all live; also settable up front from the CLI):
+  - **Shared colour scale + whole-file amplitude histogram** — a `RangeSlider`
+    beneath a histogram of the file's amplitudes sets one min/max shared by both
+    panels (`--clim LO HI`); the histogram shows the distribution with the
+    current min/max as red guide lines.
+  - **Clamp/cut toggle** (`--clip {clamp,cut}`) — out-of-range samples either show
+    the colormap end colours (clamp, default) or are cut out and rendered
+    transparent (via the colormap's under/over), so weak water column can be
+    dropped to isolate the seafloor and strong scatterers.
+  - **Drag-a-band swath selection** — a `SpanSelector` on the fan: drag an
+    across-track band and the along-track stack rebuilds from only that band
+    (`PingView.depth_column(..., across_window=...)` +
+    `WaterColumnFileView.rebuild_stack`), shown as a shaded overlay on the fan;
+    double-click or `r` resets to the full swath. `--swath LO HI` sets it up front.
+  - **Cursor lat/lon readout** — a status line driven by `motion_notify_event`:
+    over the fan, the geographic position of the cursor's across-track point for
+    the current ping (`PingView.across_to_lonlat`, equirectangular from the ping
+    position + heading); over the stack, the nadir (vessel) position of the ping
+    under the cursor.
+- The interactive widgets live only in `WaterColumnViewer.show()`, so the
+  headless `render_static` path and its tests are unaffected; every control's
+  effect is a small method (`_apply_clim` / `_set_clip` / `_on_swath` /
+  `_status_over_*`) unit-tested on an Agg viewer plus pure-geometry tests for
+  `across_to_lonlat` and the `across_window` collapse. Verified on real EM304
+  H14070 `.kmwcd` (clim + cut isolate the seafloor/midwater; a ±400 m swath band
+  gives a clean near-nadir section). `232 passed, 2 skipped`.
+
+### Fixed (water-column viewer)
+- **Window freeze on mouse move** — the lat/lon readout was wired to
+  `motion_notify_event` and called `draw_idle()` on every move, forcing a full
+  redraw of the ~200k-point fan on each event (which, together with the blitting
+  `SpanSelector`, locked the window up). Moved the readout to matplotlib's
+  built-in `Axes.format_coord` (toolbar coordinate area, no per-motion redraw)
+  and capped the fan scatter at ~60k points (display-only decimation) so
+  ping-scrub and slider redraws stay snappy.
+- **Off-screen / hidden window on WSLg** — `show()` now nudges the window to a
+  visible position and briefly raises it to the front (backend-agnostic, guarded,
+  a no-op headless).
+
+## [0.11.0] - 2026-07-02
+
+### Added (Capability D1 products — interactive water-column viewer)
+- **`mbes_tools.wc_viewer`** (console script **`mbes-wc-viewer`**) — the first
+  *interactive* water-column product (the earlier renderers all emit static
+  PNGs). One window, two linked panels over a whole file:
+  - **top** — an along-track **depth stack of the whole file**: every ping's fan
+    collapsed to an amplitude-vs-depth column and laid side by side (x = ping
+    index along track, y = depth), with a movable ping cursor. Collapse modes:
+    `swath-max` (peak-hold across all beams — surfaces any midwater target),
+    `swath-mean` (linear-intensity average), or `nadir` (a clean near-vertical
+    section from beams within a half-angle of vertical).
+  - **bottom** — the selected ping's **navigation/attitude-corrected wedge fan**
+    (across-track x depth), amplitude-coloured, with the bottom detection
+    overlaid; roll/pitch/heave are shown in the title.
+  - **linked & interactive** — click the stack or use ←/→ (and PgUp/PgDn,
+    Home/End) to scrub which ping the fan shows.
+  - Navigation, attitude and geometry are reused verbatim from
+    `water_column_geo` (`resolve_nav_track` companion discovery, the coverage
+    guard with `--on-uncovered skip|clamp`, `NavTrack.attitude_at`): the fan is
+    left **receive-stabilized** (heave + transducer depth added to depth, beams
+    not re-rotated — the Slice-3 physics), so the viewer agrees with the mosaic.
+  - Bounded memory: a whole file is decimated to `--max-pings` (adaptive stride)
+    x `--fan-samples`. `--save PING` renders the linked panels headless (Agg) for
+    review/tests; the interactive window needs a GUI backend (TkAgg/Qt).
+- **Verified against real data:** full EM304 H14070 `.kmwcd` (`0012_*`, S221
+  Cascadia): 370/372 pings (2 lead pings correctly coverage-skipped), companion
+  `#SKM` nav + attitude auto-discovered, the stack traces the ~1900 m seafloor
+  (shoaling along track) with a midwater scattering layer above it, and the fan
+  shows the symmetric ±2.8 km wedge with the bottom-detect overlay. Geometry and
+  the fan->column reductions are unit-tested; the model + static render are
+  gated over the committed EM124 `.kmwcd` / EM122 `.wcd` fixtures.
+
+## [0.10.0] - 2026-07-02
+
+### Added (Capability D1 products — Slices 2–3: geo-referenced mosaics + attitude)
+- **`mbes_tools.water_column_geo`** (console script **`mbes-wc-mosaic`**) — true
+  geo-referenced plan-view water-column products (no new required deps; numpy +
+  stdlib, matplotlib + pyproj lazy/optional):
+  - **`NavTrack`** (linear position interp, circular sin/cos heading interp) with
+    optional roll/pitch/heave, built by `nav_track_from_kmall` (prefers `#SKM`
+    true heading, falls back to `#SPO` course-over-ground) / `nav_track_from_all`
+    (`P`, with `A` attitude).
+  - **`georeference_frame`** — places each sample at `(easting, northing, depth)`
+    reusing the Slice-1 wedge; lever arm from `install.transducer_offsets`,
+    heading rotation, local ENU metres or true UTM (pyproj), auto-UTM EPSG always
+    resolved for provenance.
+  - **`GeoMosaic`** — streaming sparse-cell accumulator (`max` peak-hold or
+    `mean` linear-intensity) with an optional `depth_band` (midwater/plume) ->
+    dense grid.
+  - **Nav-source robustness** — `resolve_nav_track` does not assume the WC file
+    carries usable nav: explicit `--nav` > same-stem `.kmall`/`.all` companion
+    (prefers `#SKM`) > the WC file's own `#SPO`/`P` > a clear error; a coverage
+    guard (`--on-uncovered skip`, default) drops pings outside the nav span
+    instead of clamping them to a track endpoint.
+  - **`.wcd`/`.all` path** and a multi-line **`--combine`** composite (many files
+    into one shared-anchor, one-CRS mosaic); midwater/plume product via
+    `--depth-band LO:HI --reduce mean`.
+  - **Vessel attitude (Slice 3)** — the lever arm is rotated by the full pose
+    `Rz(H)·Ry(pitch)·Rx(roll)` and heave added to depth, but the **beam fan is
+    left roll/pitch-stabilized** (Kongsberg `beamPointAngReVertical` is already
+    stabilized at receive — re-rotating double-corrects; `--unstabilized-beams`
+    opts out). Verified on real EM124/EM122/EM304 data (matched `.kmwcd`/`.kmall`
+    pairs, `.wcd` reassembly, TN447 + H14070).
+
+## [0.9.0] - 2026-06-30
+
+### Added (Capability D1 products — Slice 1: vessel-frame water column)
+- **`mbes_tools.water_column`** — the first *product* layer on the validated
+  water-column readers (no new dependencies; core numpy + stdlib, matplotlib
+  lazy). Three pieces:
+  - **`.wcd` ping reassembly** — `reassemble_wcd_pings` / `merge_wcd_fragments`
+    concatenate the multiple `k` datagrams of a fragmented ping (`num_datagram`
+    > 1, beams partitioned by `datagram_num`) back into one full swath, grouped
+    by `counter`; `reassembled_wcd_frames(path)` yields a `WCFrame` per full
+    ping. Streaming (bounded memory); truncated tail pings are dropped unless
+    `allow_incomplete=True`.
+  - **Cartesian gridding** — `grid_frame(frame) -> WaterColumnGrid`: bins each
+    amplitude sample onto a regular `(across_track_m, depth_m)` grid using the
+    existing `wc_diagnostics` wedge geometry (`r = c·k/(2·fs)`, angle positive =
+    port). `reduce="mean"` averages in the **linear-intensity domain**
+    (`10**(dB/10)` → back to dB, the correct incoherent echo-integration mean);
+    `reduce="max"` is a peak-hold. Default cell = one-way range resolution,
+    capped at `max_cells`; `max_depth_m` / `max_across_m` clip the extent.
+  - **TVG-residual midwater/plume anomaly pass** — `detect_anomalies(frame) ->
+    WaterColumnAnomalies`: subtract a per-range background (across-beam median of
+    **water-only** samples — near-field and seafloor + guard band excluded) to
+    flatten the TVG/absorption trend, then flag positive residual outliers with a
+    robust `median + n_mad·(1.4826·MAD)` threshold (or a fixed `threshold_db`).
+    `summarize_anomalies` returns a JSON-friendly per-ping summary.
+- **`mbes-wc-grid`** console script — renders a gridded-echogram panel and an
+  amplitude/residual/background anomaly panel per file (reassembling `.wcd` by
+  `counter` first) and prints the anomaly summary. matplotlib lazy (`gui` extra).
+- **Verified against real data:** `.wcd` reassembly on the full Atlantis EM122
+  file — **762/762 pings** reconstruct exactly (`sum(num_beams_this_datagram) ==
+  num_beams_ping` for every ping, mostly 2 fragments; beam numbers monotonic);
+  the committed 3-ping clip passes through unchanged. Grid + anomaly produce sane
+  vessel-frame geometry on the committed EM124 `.kmwcd` (symmetric ±30° swath to
+  ~6.7 km, `mean`/`max` consistent), EM2040 phase-1 `.kmall` (~9 m, 2.4 cm
+  cells), and reassembled EM122 `.wcd`; anomaly defaults yield non-zero water on
+  both deep and shallow regimes. Numeric helpers unit-tested; render test gated
+  on matplotlib over the committed fixtures. Review PNGs:
+  `~/mbes_review_plots/wc_d1_products/`.
+
 ## [0.8.0] - 2026-06-29
 
 ### Added (Capability D3 — attitude & installation parsers)

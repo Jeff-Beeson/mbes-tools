@@ -1,14 +1,31 @@
 # mbes-tools — build status & continuation notes
 
-**Snapshot:** 2026-06-30. This is the handoff/status doc for the
+**Snapshot:** 2026-07-02. This is the handoff/status doc for the
 `docs/UPGRADE_PLAN.md` work. Capabilities **A, B, C** (v0.6.0), **D1**
 (water-column reader validation + `wc_diagnostics`, v0.7.0), and **D3**
 (attitude/installation/navigation parsers + `install_params`, v0.8.0) are all
 implemented, verified against real data, and **merged to `main`** (tip
-`5137d2c`, **153 passed / 2 skipped**). **Next: D1 products** (water-column
-echograms / geo-mosaics / plume detection — kickoff plan in
-`docs/WATER_COLUMN_HANDOFF.md` → "D1 products — start here"). **D2** (GSF) and
-small follow-ups are the remaining backlog below.
+`5137d2c`, **153 passed / 2 skipped**). **D1 products Slice 1** — vessel-frame
+water-column products (`mbes_tools.water_column`: `.wcd` ping reassembly +
+`(across, depth)` gridding + TVG-residual plume/midwater anomaly pass;
+`mbes-wc-grid`) — is implemented and verified (v0.9.0). **D1 products Slices 2–3**
+— true geo-referenced plan-view mosaics (`mbes_tools.water_column_geo`:
+`NavTrack` + `georeference_frame` + streaming `GeoMosaic`; `mbes-wc-mosaic`),
+robust companion-nav resolution + coverage guard, `.wcd`/`.all` support, a
+multi-line `--combine` composite, the `--depth-band` midwater/plume product, and
+vessel attitude (roll/pitch/heave, with the beam fan correctly left
+roll-stabilized) — are implemented and verified against real EM124/EM122/EM304
+data (v0.10.0). An **interactive viewer** (`mbes_tools.wc_viewer`;
+`mbes-wc-viewer`) then adds a whole-file along-track **depth stack** linked by a
+ping cursor to that ping's nav/attitude-corrected **wedge fan** — reusing the
+`water_column_geo` nav/attitude/coverage-guard so it agrees with the mosaic
+(v0.11.0) — and then gains **live operator controls** (shared colour-scale +
+whole-file amplitude histogram, clamp/cut clip toggle, drag-a-band swath
+selection, cursor lat/lon readout; v0.12.0, **232 passed / 2 skipped**). **D1
+water-column products are functionally complete.** Work is on branch
+`capability-d1-products/vessel-frame-water-column` (pushed to origin; **PR #10
+open** against `main`). **Next: D2** (native GSF reader) and small follow-ups
+are the remaining backlog below.
 
 > Read this together with `docs/UPGRADE_PLAN.md` (the spec),
 > `docs/VERIFICATION_DATA.md` (the real-data corpus + how to regenerate the
@@ -109,8 +126,10 @@ a `CHANGELOG.md` entry per capability.
 ---
 
 ## 3. Build / test status
-- **`python -m pytest -q` → 153 passed, 2 skipped** at the tip of
-  `capability-d3/attitude-installation` (142/2 at D1, 131/2 on merged `main`).
+- **`python -m pytest -q` → 232 passed, 2 skipped** at the tip of the current
+  D1-products branch `capability-d1-products/vessel-frame-water-column`
+  (v0.12.0). Merged `main` is **153/2** (tip of
+  `capability-d3/attitude-installation`; 142/2 at D1, 131/2 on the earlier `main`).
 - The 2 skips are the gated cross-model test and the gated diagnostics render
   test; run them with `MBES_TEST_DATA_ROOT=<dir>` (+ matplotlib for the render).
   The gated real `phase_flag`-2 water-column test runs when its (large, external)
@@ -197,12 +216,74 @@ additive. Recommended order and concrete first steps below.
      histograms, and a sector-frequency sanity panel (matplotlib lazy; numeric
      helpers unit-tested; render test gated on matplotlib over the committed
      fixtures). This makes the D1 validation reproducible end-to-end.
-  4. ⏭️ **Next products** (likely separate PR): true geo-referenced echogram
-     **grids/mosaics** using `mbes_tools.projection`; midwater/plume anomaly
-     detection. Reassemble fragmented `.wcd` pings by `counter` (most EM122
-     pings span multiple `k` datagrams). Note `sample_freq_Hz` is heavily
-     decimated on deep CW systems (EM122 ~67 Hz, EM124 ~127 Hz) vs ~30 kHz on
-     EM2040 — physically correct, not a bug.
+  4. ✅ **Products Slice 1 (v0.9.0) — vessel-frame water column:**
+     `mbes_tools.water_column` (`mbes-wc-grid`). Reassembles fragmented `.wcd`
+     pings by `counter` (`reassemble_wcd_pings` — verified 762/762 exact on the
+     full Atlantis EM122 file), bins a `#MWC`/`k` ping into an
+     `(across_track_m, depth_m)` amplitude grid (`grid_frame`; intensity-mean or
+     peak-hold, reusing the `wc_diagnostics` wedge geometry), and runs a first
+     **TVG-residual midwater/plume anomaly** pass (`detect_anomalies`: per-range
+     across-beam background over open water — near-field + seafloor-guard
+     excluded — then a robust MAD threshold). Core numpy+stdlib; matplotlib lazy.
+     Note `sample_freq_Hz` is heavily decimated on deep CW systems (EM122 ~67 Hz,
+     EM124 ~127 Hz → 6–11 m range bins) vs ~30 kHz on EM2040 — physically
+     correct, not a bug; the grid derives its default cell size from it per ping.
+  5. ✅ **Products Slice 2 (v0.10.0) — geo-referenced plan-view mosaics:**
+     `mbes_tools.water_column_geo` (`mbes-wc-mosaic`). Composes the vessel-frame
+     wedge with per-sample position/heading (+ install lever arms) — the D3 path
+     — into real projected coordinates, then accumulates many pings into one
+     plan-view mosaic. Pieces: (1) `NavTrack` — sorted position + heading with
+     linear position interp and **circular** (sin/cos) heading interp, built from
+     `.kmall` `#SKM` (true heading) or, for a WC-only `.kmwcd`, `#SPO` position +
+     course-over-ground as a heading proxy (`nav_track_from_kmall`), or `.all`
+     `P` (`nav_track_from_all`); (2) `georeference_frame` → `GeoSamples` at
+     `(easting, northing, depth)`: across-track (+port) → starboard/forward
+     vessel offset (+ transducer lever arm from `install_params`), rotated by
+     heading into E/N, added to the platform position; coordinates are a **local
+     ENU metric frame** anchored at a ref lon/lat (pure numpy, base-env default)
+     or **true UTM** via pyproj when present, with the auto-UTM EPSG always
+     resolved for provenance (`mbes_tools.projection`); (3) `GeoMosaic` — a
+     streaming sparse-cell accumulator (peak-hold `max` or intensity-`mean`) with
+     an optional `depth_band` (e.g. a midwater band for plume mapping) →
+     `finalize()` dense grid + edges + CRS. **Nav source is not assumed to be the
+     WC file** (WC files are often nav-poor — a `.kmwcd` usually has no `#SKM`
+     true heading, a bare `.wcd` has no `P` position at all): `resolve_nav_track`
+     prefers an explicit `--nav`, then the same-stem `.kmall`/`.all` sibling
+     (auto-discovered — where `#SKM`/attitude live), then the WC file's own nav,
+     else a clear error. A **coverage guard** (`on_uncovered="skip"` default)
+     drops pings whose time the nav track does not span rather than letting
+     `np.interp` silently clamp them to a far-away endpoint (reports
+     `n_uncovered`). Verified: committed EM124 `.kmwcd` (single athwartship swath
+     ⟂ the ~287° heading); auto-companion pulls `#SKM` from the sibling `.kmall`;
+     full matched TN447 pair grids 39/40 pings on `#SKM` true heading with the
+     one genuinely-uncovered lead ping correctly skipped. **Both formats are
+     wired:** `build_mosaic()` dispatches by extension — `.kmwcd`/`.kmall`
+     (`#MWC`) via `build_mosaic_from_kmall`, and `.wcd`/`.all` (`k`) via
+     `build_mosaic_from_wcd`, which reassembles fragmented `k` datagrams by
+     `counter` (Slice-1 `reassemble_wcd_pings`) and shares one absolute
+     `date + time` clock (`_all_header_time`) between the `k` ping time and the
+     `P` nav time (midnight-safe). Verified on the committed 3-ping EM122 `.wcd`
+     and the full 200-ping Atlantis `.wcd` (synthetic nav — no real `.wcd`/`.all`
+     pair on disk; a bare `.wcd` has no position of its own). **Multi-line
+     composite:** `build_composite_mosaic([...])` (CLI `--combine`) accumulates
+     many files into one shared-anchor mosaic (adjacent lines → a single coverage
+     map; nav-less files skipped, not fatal). **Midwater/plume product** via
+     `--depth-band LO:HI` (+ `--reduce mean` for echo-integration). Verified
+     end-to-end on the real EM304 matched pair H14070/S221 (Cascadia, ~2300 m):
+     single-line grids a correct N–S track ribbon with the nadir seafloor stripe,
+     ±2.8 km swath (=2300·tan50°), UTM 10N, `#SKM` heading (370/372 pings, 2 lead
+     pings skipped); a 4-line `--combine` composes one coverage map. **Attitude
+     (Slice-3):** `NavTrack` carries optional roll/pitch/heave (from `#SKM` /
+     `.all` `A`); `georeference_frame` rotates the **lever arm** by the full pose
+     `Rz(H)·Ry(pitch)·Rx(roll)` and adds **heave** to depth, while the **beam fan
+     stays heading-only** because Kongsberg `beamPointAngReVertical` is already
+     roll/pitch-stabilized at receive — verified empirically (shoalest-beam-angle
+     vs vessel-roll correlation ≈ 0; on a real 7.76° roll ping the stabilized
+     refinement moves samples ~0.7 m / 0.15 m depth, whereas re-rotating the
+     beams via `stabilized_beams=False` / `--unstabilized-beams` would wrongly
+     shift them ~160 m and up to ~400 m). `--no-attitude` disables it. Core
+     numpy+stdlib; matplotlib + pyproj lazy/optional. D1 water-column products
+     are functionally complete.
 - **Why / trigger:** Samoa hydrothermal-plume / midwater detection and bottom-
   detection QC. Reader validation complete; products are the remaining work.
 

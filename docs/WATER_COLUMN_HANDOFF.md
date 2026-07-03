@@ -6,12 +6,20 @@ the next phase. For the full per-capability status see `docs/BUILD_STATUS.md`
 (canonical), the API view in `docs/IMPLEMENTATION_SUMMARY.md`, the spec in
 `docs/UPGRADE_PLAN.md`, and the real-data corpus in `docs/VERIFICATION_DATA.md`.
 
-**As of:** 2026-06-30 · **Version:** 0.8.0 · **`main`** tip `5137d2c`.
-`pytest -q` = 153 passed, 2 skipped. D1 (water-column readers + `wc_diagnostics`,
-PR #8) **and** D3 (attitude/installation/navigation parsers + `install_params`,
-PR #9) are now **merged to `main`** — so the position/attitude/install path
-that true geo-referenced products need is available. **Next up: D1 products**
-(see "D1 products — start here" below).
+**As of:** 2026-07-03 · **Version:** 0.12.0 · branch
+`capability-d1-products/vessel-frame-water-column` tip `37d755c` (**PR #10** open
+against `main`; `main` tip `5137d2c` = D1+D3 merged). `pytest -q` = **232 passed,
+2 skipped** (153/2 on `main`). D1 (water-column readers + `wc_diagnostics`)
+**and** D3 (attitude/installation/navigation parsers + `install_params`) are
+merged to `main` — so the position/attitude/install path that true
+geo-referenced products need is available. **All D1 product slices are now
+DONE:** vessel-frame grid (Slice 1, `mbes_tools.water_column` / `mbes-wc-grid`),
+geo-referenced plan-view mosaic (Slice 2, `mbes_tools.water_column_geo` /
+`mbes-wc-mosaic`), roll/pitch/heave georeferencing (Slice 3), and the
+interactive viewer with live display controls (`mbes_tools.wc_viewer` /
+`mbes-wc-viewer`, v0.11.0→v0.12.0) — see "D1 products — start here" below. **D1
+water-column products are functionally complete; the next capability is D2
+(native GSF reader).**
 
 ## What D1 delivered
 
@@ -129,31 +137,64 @@ branch/PR off `main`, version → 0.9.0). The attitude/nav/install path it needs
 landed in D3, so nothing is blocked. Recommended sequencing — cheapest, most
 demonstrable first:
 
-**Slice 1 (no new deps): vessel-frame water-column product + diagnostics.**
-- New module e.g. `mbes_tools.water_column` (or extend `wc_diagnostics`): turn a
-  parsed `#MWC`/`k` ping into an `(across_track_m, depth_m)` amplitude grid, and
-  reassemble fragmented `.wcd` pings by `counter` first. The geometry already
-  exists and is unit-tested: reuse `wc_diagnostics.wedge_coords` /
-  `range_axis` / `padded_grid` / `WCFrame` (`frame_from_mwc`, `frame_from_wcd`).
-- A first **midwater/plume anomaly** pass: TVG-residual (subtract a per-range
-  background / nadir reference) and flag coherent off-bottom returns above
-  `detected_range`. Keep core numpy+stdlib; matplotlib lazy.
-- **Verify** against committed fixtures (`sample_tn447_em124.kmwcd` EM124,
-  `sample_atlantis_em122.wcd` EM122, `sample_em2040_wc_phase1.kmall`) and state
-  what was used. The review plots in `~/mbes_review_plots/d1` are the visual
-  oracle.
+**Slice 1 (no new deps): vessel-frame water-column product + diagnostics — ✅ DONE (v0.9.0).**
+Delivered as `mbes_tools.water_column` (console script `mbes-wc-grid`):
+- `reassemble_wcd_pings` / `merge_wcd_fragments` — reassemble fragmented `.wcd`
+  pings by `counter` (beams partitioned across `k` datagrams by `datagram_num`);
+  `reassembled_wcd_frames(path)` yields a full-swath `WCFrame` per ping.
+- `grid_frame(frame) -> WaterColumnGrid` — bins a `#MWC`/`k` ping into an
+  `(across_track_m, depth_m)` amplitude grid, reusing `wc_diagnostics.wedge_coords`
+  / `range_axis` / `WCFrame` (`frame_from_mwc`, `frame_from_wcd`). `reduce="mean"`
+  = linear-intensity mean → dB (incoherent echo integration); `reduce="max"` =
+  peak-hold. Default cell = per-ping one-way range resolution.
+- `detect_anomalies(frame) -> WaterColumnAnomalies` + `summarize_anomalies` — the
+  first **midwater/plume** pass: per-range across-beam background over open water
+  (near-field + seafloor-guard excluded, above `detected_range`), TVG-residual,
+  robust `median + n_mad·MAD` (or fixed) threshold. Core numpy+stdlib; matplotlib
+  lazy (grid + anomaly panels).
+- **Verified:** `.wcd` reassembly on the full Atlantis EM122 file (762/762 pings
+  exact — `sum(beams_this) == num_beams_ping`); grid + anomaly on the committed
+  `sample_tn447_em124.kmwcd`, `sample_em2040_wc_phase1.kmall`,
+  `sample_atlantis_em122.wcd`. Review plots: `~/mbes_review_plots/wc_d1_products/`.
 
-**Slice 2 (true georeferencing, uses D3): geo-referenced echogram grid / mosaic.**
-- Compose the vessel-frame wedge with per-sample **position + heading + attitude
-  + install lever arms** to put returns at real `(lon, lat, depth)`, then bin
-  with `mbes_tools.projection` (auto-UTM; Samoa → EPSG:32702 / 2S). The D3 API to
-  use: `kmall.iter_spo_datagrams`/`iter_cpo_datagrams` (or `iter_skm_datagrams`
-  for high-rate pos+attitude) and `all.iter_position_datagrams`/
-  `iter_attitude_datagrams`; install geometry via
-  `install_params.InstallationParameters.transducer_offsets()/mount_angles()`
-  from `iter_iip_datagrams` / `iter_installation_datagrams`. Interpolate
-  attitude/position to each ping time.
+**Slice 2 (true georeferencing, uses D3): geo-referenced echogram grid / mosaic — ✅ DONE (v0.10.0).**
+Implemented as `mbes_tools.water_column_geo` (`mbes-wc-mosaic`); see
+`docs/BUILD_STATUS.md` §D1 item 5 for the shipped design.
+- Composes the vessel-frame wedge with per-sample **position + heading** (+ install
+  lever arms) to put returns at real projected `(easting, northing, depth)`, then
+  bins with `mbes_tools.projection` (auto-UTM; Samoa → EPSG:32702 / 2S). Uses
+  `kmall.iter_skm_datagrams` (true heading) with an `iter_spo_datagrams`
+  course-over-ground fallback for WC-only `.kmwcd`, `all.iter_position_datagrams`,
+  and install geometry via
+  `install_params.InstallationParameters.transducer_offsets()` from
+  `iter_iip_datagrams` / `iter_installation_datagrams`; a `NavTrack` interpolates
+  position (linear) + heading (circular) to each ping time.
 - This is the Samoa-relevant deliverable (plume mapping, midwater context).
+
+**Slice 3 (attitude): roll/pitch/heave in georeferencing — ✅ DONE (v0.10.0).**
+`NavTrack.attitude_at` (from `#SKM` / `.all` `A`); `georeference_frame` rotates
+the lever arm by the full pose `Rz(H)·Ry(pitch)·Rx(roll)` and adds heave to
+depth, but leaves the beam fan **receive-stabilized** (Kongsberg
+`beamPointAngReVertical` is already roll/pitch-stabilized — re-rotating
+double-corrects; verified on EM304 H14070). `--unstabilized-beams` opts out.
+
+**Interactive viewer — ✅ DONE (v0.11.0; live display controls v0.12.0).** `mbes_tools.wc_viewer`
+(`mbes-wc-viewer`): the first *interactive* WC product. One window, two linked
+panels — a whole-file along-track **depth stack** (each ping's fan collapsed to
+an amplitude-vs-depth column: `swath-max` / `swath-mean` / `nadir`) with a
+movable ping cursor, and the selected ping's **nav/attitude-corrected wedge fan**
+(bottom-detect overlay, roll/pitch/heave in the title). Click the stack or
+←/→/PgUp/PgDn/Home/End to scrub. Reuses `water_column_geo` nav/attitude +
+coverage guard (`--on-uncovered`), bounds memory via `--max-pings` (adaptive
+stride) × `--fan-samples`, and `--save PING` renders the linked panels headless.
+Verified on real EM304 H14070 (370/372 pings, `#SKM` attitude); review PNGs
+`~/mbes_review_plots/wc_d1_products/wc_viewer_0012_em304_{swathmax,nadir}.png`.
+**v0.12.0 added live display controls** — a shared colour-scale `RangeSlider`
+under a whole-file amplitude histogram (`--clim`), a clamp/cut clip toggle
+(`--clip`, to drop weak water column and isolate the seafloor/scatterers), a
+drag-a-band across-track **swath** selection that rebuilds the along-track stack
+(`--swath`), and a cursor lat/lon readout — plus two robustness fixes (window
+freeze on mouse-move redraw; off-screen/hidden window on WSLg).
 
 **Watch-outs (already documented above):** per-ping `sample_freq_Hz` (deep-CW
 decimation), `.wcd` ping reassembly by `counter`, dual-swath `#MWC` fans,
