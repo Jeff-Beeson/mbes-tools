@@ -312,6 +312,8 @@ def scan_kmall_file(path: Path, max_scan_bytes: int) -> CatalogRow:
     em_model_from_iip = ""
     first_mrz_offset: Optional[int] = None
     first_mrz_size: Optional[int] = None
+    first_iip_offset: Optional[int] = None
+    first_iip_size: Optional[int] = None
 
     try:
         with path.open("rb") as fid:
@@ -335,12 +337,9 @@ def scan_kmall_file(path: Path, max_scan_bytes: int) -> CatalogRow:
                 type_counts[type_str] = type_counts.get(type_str, 0) + 1
                 row.n_datagrams_scanned += 1
 
-                if type_str == "#IIP" and not em_model_from_iip:
-                    fid.seek(offset)
-                    iip = fid.read(min(size, 4096))
-                    m = _EM_MODEL_RE.search(iip)
-                    if m:
-                        em_model_from_iip = f"EM{m.group(1).decode('ascii')}"
+                if type_str == "#IIP" and first_iip_offset is None:
+                    first_iip_offset = offset
+                    first_iip_size = size
 
                 if type_str == "#MRZ" and first_mrz_offset is None:
                     first_mrz_offset = offset
@@ -384,6 +383,32 @@ def scan_kmall_file(path: Path, max_scan_bytes: int) -> CatalogRow:
         except Exception as exc:  # noqa: BLE001
             if not row.error:
                 row.error = f"mrz decode: {type(exc).__name__}: {exc}"
+
+    # EM model from the first #IIP: the structured EMXV key via install_params
+    # (supersedes the old raw-bytes regex scrape; also reads the full-length text
+    # instead of capping at 4096 bytes), with a raw-text regex fallback so any
+    # file the old scrape matched still resolves.
+    if first_iip_offset is not None and first_iip_size is not None:
+        try:
+            from mbes_tools.kmall import parse_kmall_params_datagram
+
+            with path.open("rb") as fid:
+                params_dgm = parse_kmall_params_datagram(
+                    fid,
+                    datagram_start=first_iip_offset,
+                    datagram_size=first_iip_size,
+                )
+            if params_dgm is not None:
+                em_model_from_iip = params_dgm.parameters.em_model or ""
+                if not em_model_from_iip:
+                    m = _EM_MODEL_RE.search(
+                        params_dgm.parameters.raw.encode("ascii", "ignore")
+                    )
+                    if m:
+                        em_model_from_iip = f"EM{m.group(1).decode('ascii')}"
+        except Exception as exc:  # noqa: BLE001
+            if not row.error:
+                row.error = f"iip decode: {type(exc).__name__}: {exc}"
 
     # Model: prefer #IIP text, fall back to a filename hint (e.g. *_EM124.kmall).
     row.em_model = em_model_from_iip

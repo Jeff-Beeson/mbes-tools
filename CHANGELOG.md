@@ -4,6 +4,24 @@ All notable changes to `mbes-tools` are documented here. The project follows
 [semantic versioning](https://semver.org/) (currently 0.x — minor versions may
 add features; the public API is kept backward compatible where practical).
 
+## [0.16.1] - 2026-07-04
+
+### Changed (catalog)
+- **`mbes-catalog` now derives the `.kmall`/`.kmwcd` EM model from the `#IIP`
+  installation datagram's structured `EMXV` key** — via
+  `install_params.InstallationParameters` — instead of a raw-bytes `EM\d{3,4}`
+  regex scrape capped at the first 4096 bytes (the D3 0.8.0 entry noted
+  `install_params` "supersedes the catalog's regex EM-model scrape"; this wires
+  it in). The scanner records the first `#IIP` offset/size during the envelope
+  walk and decodes it once with `kmall.parse_kmall_params_datagram` afterwards
+  (mirroring the first-`#MRZ` decode), so the model comes from the parsed
+  parameter string rather than a byte pattern that could coincide with a serial
+  or IP. A raw-text regex fallback and the existing filename hint are retained,
+  so any file the old path resolved still resolves.
+- **Verified identical** on the committed fixtures — EM304, EM2040, and EM124
+  (both `.kmall` and `.kmwcd`) resolve exactly as before. 2 new synthetic
+  `.kmall` tests (model from `#IIP` `EMXV`; filename fallback when no `#IIP`).
+
 ## [0.16.0] - 2026-07-03
 
 ### Added (water-column — empirical normalization)
