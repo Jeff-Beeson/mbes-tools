@@ -435,6 +435,9 @@ class WaterColumnViewer:
         self.view = view
         self.plt = plt
         self.current = 0
+        # Cap the fan scatter so interactive redraws (scrub / slider) stay snappy;
+        # a dense wedge needs far fewer than the full decimated grid to read well.
+        self._max_fan_points = 60_000
         self._clip_mode = "cut" if clip_mode == "cut" else "clamp"
         self._across_window = across_window
         # ``_cmap`` is derived from this base with under/over colours that encode
@@ -506,7 +509,16 @@ class WaterColumnViewer:
         self.sc = None
         self._draw_fan()
         self._update_suptitle()
-        self.status = self.fig.text(0.06, 0.02, "", fontsize=9, family="monospace")
+        # Lat/lon readout goes through the (cheap) toolbar coordinate display — no
+        # per-motion canvas redraw (that would lock up the heavy fan scatter).
+        self.ax_fan.format_coord = lambda x, y: self._status_over_fan(x, y)
+        self.ax_stack.format_coord = lambda x, y: self._status_over_stack(round(x), y)
+        self.status = self.fig.text(
+            0.06, 0.02,
+            "drag the fan = swath band · double-click / r = reset · ←/→ scrub · "
+            "hover = lat/lon (toolbar)",
+            fontsize=8, color="0.35",
+        )
 
     def _draw_histogram(self) -> None:
         self.ax_hist.clear()
@@ -538,6 +550,9 @@ class WaterColumnViewer:
         p = self.view.pings[self.current]
         self.ax_fan.clear()
         across, depth, amp = p.fan_points()
+        if amp.size > self._max_fan_points:  # decimate for a snappy redraw
+            step = int(np.ceil(amp.size / self._max_fan_points))
+            across, depth, amp = across[::step], depth[::step], amp[::step]
         vmin, vmax = self._clim
         self.sc = None
         if amp.size:
@@ -651,17 +666,6 @@ class WaterColumnViewer:
         return (f"stack  ping {i:4d}   nadir lat {p.lat:+.5f}  lon {p.lon:+.5f}   "
                 f"depth {depth_m:6.0f} m")
 
-    def _on_motion(self, event) -> None:
-        if event.xdata is None or event.ydata is None:
-            return
-        if event.inaxes is self.ax_fan:
-            self.status.set_text(self._status_over_fan(event.xdata, event.ydata))
-        elif event.inaxes is self.ax_stack:
-            self.status.set_text(self._status_over_stack(round(event.xdata), event.ydata))
-        else:
-            return
-        self.fig.canvas.draw_idle()
-
     def render_static(self, out: Path, index: int = 0) -> Path:
         """Headless PNG of the linked panels at ``index`` (for review/tests)."""
         self.select(index) if index != self.current else self._draw_fan()
@@ -724,7 +728,6 @@ class WaterColumnViewer:
         self._build_controls()
         self.fig.canvas.mpl_connect("button_press_event", self._on_click)
         self.fig.canvas.mpl_connect("key_press_event", self._on_key)
-        self.fig.canvas.mpl_connect("motion_notify_event", self._on_motion)
         self.plt.show()
 
 
