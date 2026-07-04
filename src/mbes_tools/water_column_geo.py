@@ -357,6 +357,7 @@ class GeoSamples:
     roll_deg: float = 0.0
     pitch_deg: float = 0.0
     heave_m: float = 0.0
+    epsg: Optional[int] = None      # real projected EPSG in "utm" mode; None for local ENU
 
     def __len__(self) -> int:
         return int(self.easting_m.size)
@@ -450,6 +451,7 @@ def georeference_frame(
         roll_deg=roll,
         pitch_deg=pitch,
         heave_m=heave,
+        epsg=epsg if use_pyproj else None,
     )
 
 
@@ -472,6 +474,7 @@ class GeoMosaicResult:
     n_pings: int
     depth_band: Optional[Tuple[float, float]]
     n_uncovered: int = 0          # pings dropped because nav didn't span their time
+    epsg: Optional[int] = None    # real projected EPSG (utm mode); None for local ENU
 
     @property
     def east_centers(self) -> np.ndarray:
@@ -508,6 +511,7 @@ class GeoMosaic:
         self.reduce = reduce
         self.depth_band = depth_band
         self.crs_label: Optional[str] = None
+        self.epsg: Optional[int] = None
         self.n_pings = 0
         # For max: cell -> best dB. For mean: cell -> [sum_linear, count].
         self._cells: Dict[Tuple[int, int], object] = {}
@@ -522,6 +526,7 @@ class GeoMosaic:
         self.n_pings += 1
         if self.crs_label is None:
             self.crs_label = gs.crs_label
+            self.epsg = gs.epsg
 
         e, n, d, a = gs.easting_m, gs.northing_m, gs.depth_m, gs.amplitude_db
         if self.depth_band is not None:
@@ -576,6 +581,7 @@ class GeoMosaic:
                 crs_label=self.crs_label or "unknown",
                 n_pings=self.n_pings,
                 depth_band=self.depth_band,
+                epsg=self.epsg,
             )
 
         ies = np.fromiter((k[0] for k in self._cells), dtype=np.int64)
@@ -610,6 +616,7 @@ class GeoMosaic:
             crs_label=self.crs_label or "unknown",
             n_pings=self.n_pings,
             depth_band=self.depth_band,
+            epsg=self.epsg,
         )
 
 
@@ -647,6 +654,110 @@ def panel_mosaic(result: GeoMosaicResult, out: Path, stem: str) -> Path:
     fig.savefig(p, dpi=120)
     plt.close(fig)
     return p
+
+
+# ---------------------------------------------------------------------------
+# Raster export: GeoTIFF (rasterio, optional) + ESRI ASCII Grid (numpy-only).
+# ---------------------------------------------------------------------------
+
+
+def _mosaic_wkt(epsg: Optional[int]) -> Optional[str]:
+    """WKT for a projected EPSG via pyproj, or ``None`` (pyproj missing / local frame)."""
+    if not epsg:
+        return None
+    try:
+        from pyproj import CRS
+    except ImportError:
+        return None
+    return CRS.from_epsg(epsg).to_wkt()
+
+
+def export_ascii_grid(result: GeoMosaicResult, path) -> Path:
+    """Write the mosaic as an ESRI ASCII Grid (``.asc``); numpy-only, always available.
+
+    Amplitude (dB) is written north-up (row 0 = northernmost), ``NaN`` ->
+    ``NODATA_value``. A companion ``.prj`` (WKT) is written when the mosaic has a
+    real projected EPSG (``projector="utm"``) and pyproj is importable; in the
+    local-ENU frame the grid is still valid *relative* metres but carries no
+    georeferencing, so no ``.prj`` is emitted.
+    """
+    path = Path(path).with_suffix(".asc")
+    grid = np.flipud(result.amplitude_db)          # row 0 = north (ESRI is north-up)
+    nodata = -9999.0
+    body = np.where(np.isfinite(grid), grid, nodata)
+    header = (
+        f"ncols        {result.amplitude_db.shape[1]}\n"
+        f"nrows        {result.amplitude_db.shape[0]}\n"
+        f"xllcorner    {float(result.east_edges[0]):.6f}\n"
+        f"yllcorner    {float(result.north_edges[0]):.6f}\n"
+        f"cellsize     {result.cell_m:.6f}\n"
+        f"NODATA_value {nodata:g}\n"
+    )
+    with open(path, "w") as fh:
+        fh.write(header)
+        np.savetxt(fh, body, fmt="%.3f")
+    wkt = _mosaic_wkt(result.epsg)
+    if wkt:
+        path.with_suffix(".prj").write_text(wkt)
+    return path
+
+
+def export_geotiff(result: GeoMosaicResult, path) -> Path:
+    """Write the mosaic amplitude as a single-band float32 GeoTIFF (needs rasterio).
+
+    Requires a real projected CRS — run the mosaic with ``--projector utm`` (needs
+    pyproj) so ``result.epsg`` is set; the local-ENU frame has no CRS to embed (use
+    :func:`export_ascii_grid` there). rasterio is imported lazily — install it via
+    ``pip install 'mbes-tools[geo]'``.
+    """
+    path = Path(path).with_suffix(".tif")
+    if not result.epsg:
+        raise RuntimeError(
+            "GeoTIFF needs a projected CRS but the mosaic is in a local ENU frame "
+            "(epsg=None). Re-run with --projector utm (requires pyproj), or use the "
+            ".asc export."
+        )
+    try:
+        import rasterio
+        from rasterio.crs import CRS
+        from rasterio.transform import from_origin
+    except ImportError as exc:
+        raise RuntimeError(
+            "GeoTIFF export requires rasterio (pip install 'mbes-tools[geo]'); "
+            "use the .asc export for a dependency-free raster."
+        ) from exc
+
+    data = np.flipud(result.amplitude_db).astype(np.float32)   # north-up (row 0 = north)
+    transform = from_origin(
+        float(result.east_edges[0]), float(result.north_edges[-1]),
+        result.cell_m, result.cell_m,
+    )
+    with rasterio.open(
+        path, "w", driver="GTiff",
+        height=data.shape[0], width=data.shape[1], count=1,
+        dtype="float32", crs=CRS.from_epsg(result.epsg),
+        transform=transform, nodata=float("nan"),
+    ) as dst:
+        dst.write(data, 1)
+        dst.set_band_description(1, "water-column amplitude (dB)")
+    return path
+
+
+def _write_rasters(result: GeoMosaicResult, out: Path, stem: str, *, geotiff: bool, asc: bool) -> List[Path]:
+    """Write the requested raster export(s) alongside the PNG; errors are non-fatal."""
+    made: List[Path] = []
+    base = out / f"wc_mosaic_{stem}"
+    if asc:
+        try:
+            made.append(export_ascii_grid(result, base))
+        except Exception as exc:  # noqa: BLE001
+            print("FAIL asc", stem, "->", type(exc).__name__, str(exc)[:160])
+    if geotiff:
+        try:
+            made.append(export_geotiff(result, base))
+        except Exception as exc:  # noqa: BLE001
+            print("FAIL geotiff", stem, "->", type(exc).__name__, str(exc)[:160])
+    return made
 
 
 # ---------------------------------------------------------------------------
@@ -1052,8 +1163,10 @@ def generate(
     apply_attitude: bool = True,
     stabilized_beams: bool = True,
     limit: Optional[int] = None,
+    write_geotiff: bool = False,
+    write_asc: bool = False,
 ) -> List[Path]:
-    """Build + render mosaic panel(s) from water-column files. Returns PNG paths.
+    """Build + render mosaic panel(s) from water-column files. Returns output paths.
 
     Accepts both families (dispatched by extension): `.kmwcd`/`.kmall` (``#MWC``)
     and `.wcd`/`.all` (``k``). ``nav_paths`` (if given) supplies the navigation
@@ -1077,11 +1190,13 @@ def generate(
         print(f"OK   composite: {result.n_pings} pings, grid {result.amplitude_db.shape}, "
               f"{int(result.counts.sum())} samples{uncov}, {result.crs_label}")
         stem = f"composite_{len(files)}files"
+        made: List[Path] = []
         try:
-            return [panel_mosaic(result, out, stem)]
+            made.append(panel_mosaic(result, out, stem))
         except Exception as exc:  # noqa: BLE001
             print("FAIL panel", stem, "->", type(exc).__name__, str(exc)[:120])
-            return []
+        made += _write_rasters(result, out, stem, geotiff=write_geotiff, asc=write_asc)
+        return made
 
     made: List[Path] = []
     for f in mwc_files:
@@ -1110,6 +1225,7 @@ def generate(
             made.append(panel_mosaic(result, out, stem))
         except Exception as exc:  # noqa: BLE001
             print("FAIL panel", stem, "->", type(exc).__name__, str(exc)[:120])
+        made += _write_rasters(result, out, stem, geotiff=write_geotiff, asc=write_asc)
     return made
 
 
@@ -1126,7 +1242,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     "(.kmwcd/.kmall #MWC or .wcd/.all k) into a plan-view "
                     "(easting/northing) amplitude grid using companion nav + install."
     )
-    ap.add_argument("-o", "--output", default="mbes_wc_mosaic", help="Output directory for PNGs.")
+    ap.add_argument("-o", "--output", default="mbes_wc_mosaic",
+                    help="Output directory for the mosaic PNG (+ any --geotiff/--asc rasters).")
     ap.add_argument("--mwc", nargs="+", required=True,
                     help="One or more water-column files (.kmwcd/.kmall or .wcd/.all).")
     ap.add_argument("--nav", nargs="+", default=None, metavar="FILE",
@@ -1162,6 +1279,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                          "angles — Kongsberg #MWC/k beamPointAngReVertical is already "
                          "roll/pitch-stabilized, so this double-corrects normal data.")
     ap.add_argument("--limit", type=int, default=None, help="Only the first N pings per file.")
+    ap.add_argument("--geotiff", action="store_true",
+                    help="Also write a georeferenced GeoTIFF (needs --projector utm + rasterio; "
+                         "pip install 'mbes-tools[geo]').")
+    ap.add_argument("--asc", action="store_true",
+                    help="Also write an ESRI ASCII Grid (.asc + .prj sidecar); numpy-only, works "
+                         "in the base env and is GDAL-convertible to GeoTIFF.")
     args = ap.parse_args(argv)
 
     made = generate(
@@ -1171,9 +1294,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         depth_band=_parse_band(args.depth_band), projector=args.projector,
         max_depth_m=args.max_depth_m, on_uncovered=args.on_uncovered,
         apply_attitude=not args.no_attitude, stabilized_beams=not args.unstabilized_beams,
-        limit=args.limit,
+        limit=args.limit, write_geotiff=args.geotiff, write_asc=args.asc,
     )
-    print(f"\nWrote {len(made)} mosaic panel(s) to {args.output}")
+    print(f"\nWrote {len(made)} mosaic output(s) to {args.output}")
 
 
 if __name__ == "__main__":

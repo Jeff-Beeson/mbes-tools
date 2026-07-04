@@ -21,11 +21,14 @@ ping cursor to that ping's nav/attitude-corrected **wedge fan** — reusing the
 `water_column_geo` nav/attitude/coverage-guard so it agrees with the mosaic
 (v0.11.0) — and then gains **live operator controls** (shared colour-scale +
 whole-file amplitude histogram, clamp/cut clip toggle, drag-a-band swath
-selection, cursor lat/lon readout; v0.12.0, **232 passed / 2 skipped**). **D1
-water-column products are functionally complete.** Work is on branch
-`capability-d1-products/vessel-frame-water-column` (pushed to origin; **PR #10
-open** against `main`). **Next: D2** (native GSF reader) and small follow-ups
-are the remaining backlog below.
+selection, cursor lat/lon readout; v0.12.0). **D1 water-column products are
+functionally complete and merged to `main`** (PR #10). A follow-on **water-column
+products enhancement** track is now underway: **Slice 1 — georeferenced raster
+export** (`mbes-wc-mosaic --geotiff`/`--asc`, EPSG threaded through the mosaic,
+new `geo` extra) landed at **v0.13.0** (**237 passed / 4 skipped**), with
+height-above-seafloor bands, gridding speedups (vectorized map-reduce +
+multiprocessing + optional GPU), and TVG/angular normalization planned next
+(see `~/.claude/plans`). **D2** (native GSF reader) remains in the backlog below.
 
 > Read this together with `docs/UPGRADE_PLAN.md` (the spec),
 > `docs/VERIFICATION_DATA.md` (the real-data corpus + how to regenerate the
