@@ -44,10 +44,15 @@ against the Kongsberg KMALL spec — and re-apply the `20·logR` volume law + `2
 relative dB, absolute `Sv` unreachable from these files) at **v0.18.0**, and
 **Slice 7 — nodata gap fill** (`mbes-wc-mosaic --fill-nodata N`: distance-bounded
 8-neighbour linear-intensity interpolation of empty cells, numpy-only, filled
-cells keep `count 0`; `water_column_geo.fill_mosaic_nodata`) at **v0.19.0**
-(**288 passed / 3 skipped**). The catalog EM-model rewire also merged (v0.16.1).
-The optional-GPU path was dropped by request. **D2** (native GSF reader) is now the
-top of the backlog below.
+cells keep `count 0`; `water_column_geo.fill_mosaic_nodata`) at **v0.19.0**, and
+**Slice 8 — decode tail-trim** (the mosaic caps each ping's decoded grid width at
+the upper sample the active `--clean-water`/`--max-depth-m`/`--depth-band`/
+`--altitude-band` filters could keep; `mbes_tools.wc_sample_bound`, automatic and
+bit-identical; ~halves per-ping grid width → memory + a modest speedup) at
+**v0.20.0** (**306 passed / 3 skipped**). The catalog EM-model rewire also merged
+(v0.16.1). The optional-GPU path was dropped by request; a reader-level decode trim
+(cutting the `struct.unpack` half) and wiring the trim into grid/viewer are noted
+follow-ups. **D2** (native GSF reader) is the top of the backlog below.
 
 > Read this together with `docs/UPGRADE_PLAN.md` (the spec),
 > `docs/VERIFICATION_DATA.md` (the real-data corpus + how to regenerate the
