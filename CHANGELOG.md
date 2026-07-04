@@ -4,6 +4,34 @@ All notable changes to `mbes-tools` are documented here. The project follows
 [semantic versioning](https://semver.org/) (currently 0.x — minor versions may
 add features; the public API is kept backward compatible where practical).
 
+## [0.15.0] - 2026-07-03
+
+### Changed (water-column mosaic — accumulator performance)
+- **`GeoMosaic` rewritten as a vectorized map-reduce accumulator.** The old
+  per-ping Python **dict-merge** loop and the per-cell Python **finalize** loop
+  (the two accumulation hot spots) are gone. Each ping is reduced to its unique
+  cells and **buffered** as sparse `(iE, iN, value[, count])` rows; a single
+  global reduce rasterizes to the dense grid. Both the per-ping and global
+  reductions encode the cell as one int64 key and use C-level primitives
+  (`bincount` for the mean sum/count, sort + `maximum.reduceat` for the peak)
+  instead of a 2-D `unique`/lexsort. **~6–10× faster** accumulation on a
+  synthetic 2000-ping × 4000-sample line (see `scripts/bench_wc_mosaic.py`);
+  output is **bit-identical** to the previous implementation (a regression test
+  asserts this cell-by-cell for both `max` and `mean`). Buffers compact once they
+  exceed `compact_rows` so memory stays proportional to occupied cells.
+
+### Added (water-column mosaic — parallel composite)
+- **`mbes-wc-mosaic --combine --workers N`** georeferences the files across a
+  process pool (one file per task). The shared grid anchor is fixed up front and
+  each worker returns its per-ping partials, merged **in file order**, so the
+  result is **bit-for-bit identical to the serial build** for both `max` and
+  `mean` (verified on the real EM124 fixture). Default `workers=1` keeps the
+  original streaming path. Best for many-file surveys; small inputs are dominated
+  by process-startup overhead.
+- `scripts/bench_wc_mosaic.py` — micro-benchmark for the accumulator (new vs old)
+  and, given real files, the serial-vs-parallel composite (with a bit-identity
+  check).
+
 ## [0.14.0] - 2026-07-03
 
 ### Added (water-column mosaic — height-above-seafloor band)

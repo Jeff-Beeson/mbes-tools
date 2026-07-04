@@ -782,3 +782,122 @@ def test_build_mosaic_altitude_band_clamp_grids_real_ping():
     )
     assert res.altitude_band == (0.0, 500.0)
     assert res.n_pings == 1 and res.amplitude_db.ndim == 2
+
+
+# ---------------------------------------------------------------------------
+# 7. Performance: vectorized map-reduce accumulator + parallel composite (Slice 3).
+# ---------------------------------------------------------------------------
+
+
+def _reference_mosaic(pings, cell_m, reduce):
+    """A dict-based reference accumulator (the pre-Slice-3 algorithm) for a list
+    of GeoSamples, used to assert the buffered accumulator is bit-identical."""
+    cells = {}
+    for gs in pings:
+        e, n, a = gs.easting_m, gs.northing_m, gs.amplitude_db
+        ie = np.floor(e / cell_m).astype(np.int64)
+        jn = np.floor(n / cell_m).astype(np.int64)
+        uniq, inv = np.unique(np.column_stack([ie, jn]), axis=0, return_inverse=True)
+        inv = inv.ravel()
+        if reduce == "max":
+            best = np.full(uniq.shape[0], -np.inf)
+            np.maximum.at(best, inv, a)
+            for (ke, kn), v in zip(map(tuple, uniq.tolist()), best.tolist()):
+                cur = cells.get((ke, kn))
+                if cur is None or v > cur:
+                    cells[(ke, kn)] = v
+        else:
+            lin = np.power(10.0, a / 10.0)
+            sums = np.zeros(uniq.shape[0]); np.add.at(sums, inv, lin)
+            cnts = np.bincount(inv, minlength=uniq.shape[0])
+            for (ke, kn), s, c in zip(map(tuple, uniq.tolist()), sums.tolist(), cnts.tolist()):
+                cur = cells.get((ke, kn))
+                if cur is None:
+                    cells[(ke, kn)] = [s, c]
+                else:
+                    cur[0] += s; cur[1] += c
+    return cells
+
+
+def _random_pings(n_pings, seed=0):
+    """Synthetic GeoSamples spread over a few overlapping cells (dense overlap so
+    max/mean reductions actually combine many samples per cell)."""
+    rng = np.random.default_rng(seed)
+    out = []
+    for _ in range(n_pings):
+        k = int(rng.integers(20, 60))
+        e = rng.uniform(0, 120, k)
+        n = rng.uniform(0, 120, k)
+        a = rng.uniform(-60, -5, k)
+        out.append(geo_samples(e, n, np.full(k, 100.0), a))
+    return out
+
+
+@pytest.mark.parametrize("reduce", ["max", "mean"])
+def test_accumulator_is_bit_identical_to_reference(reduce):
+    pings = _random_pings(40, seed=3)
+    m = wg.GeoMosaic(cell_m=10.0, reduce=reduce)
+    for gs in pings:
+        m.add(gs)
+    res = m.finalize()
+
+    ref = _reference_mosaic(pings, 10.0, reduce)
+    # Compare cell-by-cell against the dict reference, bit-for-bit.
+    ie_min = min(k[0] for k in ref)
+    jn_min = min(k[1] for k in ref)
+    for (ke, kn), v in ref.items():
+        row, col = kn - jn_min, ke - ie_min
+        expected = v if reduce == "max" else 10.0 * np.log10(v[0] / v[1])
+        assert res.amplitude_db[row, col] == expected  # exact, not approx
+
+
+@pytest.mark.parametrize("reduce", ["max", "mean"])
+def test_compaction_is_bit_identical(reduce):
+    # A tiny compaction threshold forces mid-stream compaction; the result must
+    # match a single-shot accumulation exactly (compaction preserves order).
+    pings = _random_pings(30, seed=7)
+    big = wg.GeoMosaic(cell_m=10.0, reduce=reduce, compact_rows=10**9)
+    small = wg.GeoMosaic(cell_m=10.0, reduce=reduce, compact_rows=50)
+    for gs in pings:
+        big.add(gs); small.add(gs)
+    rb, rs = big.finalize(), small.finalize()
+    assert rb.amplitude_db.shape == rs.amplitude_db.shape
+    np.testing.assert_array_equal(  # exact
+        np.nan_to_num(rb.amplitude_db, nan=-999), np.nan_to_num(rs.amplitude_db, nan=-999)
+    )
+
+
+@pytest.mark.parametrize("reduce", ["max", "mean"])
+def test_add_partial_matches_add(reduce):
+    # Feeding rows via add_partial (the parallel merge primitive) must match add().
+    pings = _random_pings(12, seed=11)
+    direct = wg.GeoMosaic(cell_m=10.0, reduce=reduce)
+    for gs in pings:
+        direct.add(gs)
+    viap = wg.GeoMosaic(cell_m=10.0, reduce=reduce)
+    for gs in pings:
+        ie, jn, val, cnt = wg._ping_cell_partials(gs, 10.0, reduce, None, None)
+        viap.add_partial(ie, jn, val, cnt, n_pings=1)
+    rd, rp = direct.finalize(), viap.finalize()
+    np.testing.assert_array_equal(
+        np.nan_to_num(rd.amplitude_db, nan=-999), np.nan_to_num(rp.amplitude_db, nan=-999)
+    )
+
+
+@pytest.mark.parametrize("reduce", ["max", "mean"])
+def test_parallel_composite_matches_serial(reduce):
+    """workers=2 must produce a bit-identical mosaic to workers=1 on real data."""
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    kw = dict(projector="local", cell_m=25.0, auto_companion=False,
+              on_uncovered="clamp", reduce=reduce)
+    serial = wg.build_composite_mosaic([fx, fx], workers=1, **kw)
+    parallel = wg.build_composite_mosaic([fx, fx], workers=2, **kw)
+    assert parallel.n_pings == serial.n_pings == 2
+    assert parallel.amplitude_db.shape == serial.amplitude_db.shape
+    np.testing.assert_array_equal(  # bit-for-bit
+        np.nan_to_num(serial.amplitude_db, nan=-999),
+        np.nan_to_num(parallel.amplitude_db, nan=-999),
+    )
+    np.testing.assert_array_equal(serial.counts, parallel.counts)
