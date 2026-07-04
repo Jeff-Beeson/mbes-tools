@@ -1059,31 +1059,6 @@ def _warn_uncovered(path, kind, n_uncovered, nav):
     )
 
 
-def _decode_bound(*, depth_band, altitude_band, max_depth_m, clean_water,
-                  msr_guard_m, msr_percentile, normalize):
-    """Build the :class:`SampleBoundSpec` for tail-trimming the per-ping decode.
-
-    Only bounds that leave the output **bit-identical** are included. The depth /
-    altitude / max-depth ceilings are dropped when ``--normalize empirical`` is
-    active, because that median-polish fit runs over the *whole* water column
-    before the band filter — trimming below the bottom would change the fit.
-    ``--clean-water`` is always safe (already applied before normalize), and it is
-    a no-op for ``sv``/``none``. Returns ``None`` when nothing can be trimmed.
-    """
-    from mbes_tools.wc_sample_bound import SampleBoundSpec
-
-    empirical = normalize == "empirical"
-    spec = SampleBoundSpec(
-        max_depth_m=None if empirical else max_depth_m,
-        depth_band=None if empirical else depth_band,
-        altitude_band=None if empirical else altitude_band,
-        clean_water=clean_water,
-        msr_guard_m=msr_guard_m,
-        msr_percentile=msr_percentile,
-    )
-    return spec if spec.bounds_tail() else None
-
-
 def _accumulate_into(
     mosaic: "GeoMosaic",
     anchor_ref: List[Optional[Tuple[float, float]]],
@@ -1118,9 +1093,6 @@ def _accumulate_into(
 
     lo, hi = nav.time_span
     normalizer = frame_normalizer(normalize, absorption_db_km=absorption_db_km)
-    bound = _decode_bound(depth_band=mosaic.depth_band, altitude_band=mosaic.altitude_band,
-                          max_depth_m=max_depth_m, clean_water=clean_water,
-                          msr_guard_m=msr_guard_m, msr_percentile=msr_percentile, normalize=normalize)
     n_uncovered = 0
     for i, item in enumerate(items):
         if limit is not None and i >= limit:
@@ -1130,7 +1102,7 @@ def _accumulate_into(
             n_uncovered += 1
             if on_uncovered == "skip":
                 continue
-        frame = frame_fn(item, bound=bound)
+        frame = frame_fn(item)
         if clean_water:
             frame = apply_min_slant_range(frame, guard_m=msr_guard_m, percentile=msr_percentile)
         if normalizer is not None:
@@ -1388,11 +1360,6 @@ def _mosaic_worker(args):
     clean_water = cfg.get("clean_water", False)
     msr_guard_m = cfg.get("msr_guard_m", 0.0)
     msr_percentile = cfg.get("msr_percentile", 0.0)
-    bound = _decode_bound(
-        depth_band=cfg.get("depth_band"), altitude_band=cfg.get("altitude_band"),
-        max_depth_m=cfg.get("max_depth_m"), clean_water=clean_water,
-        msr_guard_m=msr_guard_m, msr_percentile=msr_percentile, normalize=cfg.get("normalize"),
-    )
     if clean_water:
         from mbes_tools.water_column import apply_min_slant_range
     ies: List[np.ndarray] = []
@@ -1411,7 +1378,7 @@ def _mosaic_worker(args):
             n_unc += 1
             if cfg["on_uncovered"] == "skip":
                 continue
-        frame = frame_fn(item, bound=bound)
+        frame = frame_fn(item)
         if clean_water:
             frame = apply_min_slant_range(frame, guard_m=msr_guard_m, percentile=msr_percentile)
         if normalizer is not None:

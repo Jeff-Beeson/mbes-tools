@@ -4,31 +4,6 @@ All notable changes to `mbes-tools` are documented here. The project follows
 [semantic versioning](https://semver.org/) (currently 0.x — minor versions may
 add features; the public API is kept backward compatible where practical).
 
-## [0.20.0] - 2026-07-04
-
-### Changed (water-column mosaic — decode tail-trim from the active filters)
-- The mosaic now **tail-trims the per-ping decode** using the active
-  `--clean-water` / `--max-depth-m` / `--depth-band` / `--altitude-band` filters:
-  each filter implies an upper sample index `k_max` (computed from the beam
-  headers — pointing angle, detected-bottom sample — plus per-ping `c`/`fs`), and
-  `padded_grid` builds only up to `k_max`, skipping the below-`k_max` tail that the
-  filter would discard anyway. Automatic and internal — **no new flag**, and the
-  output is **bit-identical** (the bound is a conservative superset and every exact
-  filter still runs downstream; a regression test asserts equality for each filter
-  and combination, incl. the `--workers` path).
-- New leaf module `mbes_tools.wc_sample_bound` (`SampleBoundSpec`,
-  `sample_upper_bound`); `padded_grid` gains `max_width`; `frame_from_mwc` /
-  `frame_from_wcd` gain `bound=`.
-- **Correctness guard:** the depth/altitude/max-depth ceilings are suppressed when
-  `--normalize empirical` is active (that median-polish fits the whole water column
-  *before* the band filter, so trimming below the bottom would change the fit);
-  `--clean-water` (applied pre-normalize) and `sv`/`none` are always safe.
-- **Effect:** roughly halves the per-ping grid width on the real EM304 H14070
-  (1409 → ~820 samples for `--clean-water`/`--max-depth-m`, 652 for a `--depth-band`)
-  — a solid **memory** reduction and a **modest** frame-build speedup (~1.1–1.7×,
-  largest for `--depth-band`). The bigger decode cost (the reader's `struct.unpack`)
-  is untouched here; cutting it needs reader-level changes, left as a follow-up.
-
 ## [0.19.0] - 2026-07-04
 
 ### Added (water-column mosaic — nodata gap fill)
