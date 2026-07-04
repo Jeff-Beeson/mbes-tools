@@ -4,6 +4,36 @@ All notable changes to `mbes-tools` are documented here. The project follows
 [semantic versioning](https://semver.org/) (currently 0.x — minor versions may
 add features; the public API is kept backward compatible where practical).
 
+## [0.18.0] - 2026-07-04
+
+### Added (water-column — relative-Sv normalization)
+- **`--normalize sv`** (on `mbes-wc-mosaic`, `mbes-wc-grid`, `mbes-wc-viewer`) —
+  re-express the logged amplitude as **relative volume-scattering `Sv`**. The
+  instrument applies an `X·log10(R)` TVG (`X` = Kongsberg **`TVGfunctionApplied`**,
+  default 30 — a seafloor/reflectivity law) plus a constant offset `OFS`
+  (**`TVGoffset_dB`**); volume scattering wants the `20·log10(R)` law, so per
+  one-way slant range `R`:
+
+      Sv_rel = amp_dB − OFS + (20 − X)·log10(R) + 2·α·R
+
+- **`--absorption DB_PER_KM`** supplies the absorption coefficient `α` for the
+  `2·α·R` term. `#MWC`/`k` do **not** record absorption, source level, or beam
+  solid angle (confirmed against the Kongsberg KMALL datagram spec), so this is a
+  **relative** quantity — an unknown constant remains and only the range
+  dependence is corrected. `α` defaults to 0 (spreading-law only); it matters in
+  deep water at high frequency (e.g. EM304 ~30 kHz over ~2 km).
+- The applied-TVG constants are now carried on `WCFrame`
+  (`tvg_function_x`, `tvg_offset_db`), populated by `frame_from_mwc` /
+  `frame_from_wcd`; `mbes_tools.water_column_normalize.sv_relative` does the
+  transform (raising clearly if a frame lacks the constants, e.g. a synthetic one).
+  Threaded through the mosaic process-pool path **bit-for-bit vs serial**.
+- **Verified:** synthetic pings reproduce `amp − OFS + (20−X)·log10(R) + 2αR`
+  exactly (incl. the absorption term and the R=0 near-field NaN); the real EM124
+  `.kmwcd` frame carries the constants and the mosaic keeps its footprint while
+  `--absorption 8` lifts the deep returns (as `2αR` grows with range). 8 new tests.
+- This completes the deferred Slice-4b (the empirical de-trend shipped in 0.16.0);
+  absolute `Sv` calibration remains out of reach from these files alone.
+
 ## [0.17.0] - 2026-07-04
 
 ### Added (water-column — minimum-slant-range "clean water column" filter)

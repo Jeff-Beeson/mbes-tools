@@ -104,7 +104,7 @@ def test_normalize_none_is_identity():
 def test_normalize_rejects_bad_method():
     frame, _, _ = _synthetic_frame()
     with pytest.raises(ValueError, match="normalize method"):
-        wn.normalize_frame(frame, method="sv")  # deferred path, not yet available
+        wn.normalize_frame(frame, method="bogus")
 
 
 def test_normalize_preserves_frame_fields():
@@ -151,3 +151,51 @@ def test_normalization_robust_with_noise():
     # (injected trends span ~10-18 dB; residual medians should be well under 1 dB).
     assert np.nanstd(range_profile) < 0.6
     assert np.nanstd(angle_profile) < 0.6
+
+
+# ---------------------------------------------------------------------------
+# Relative-Sv normalization (method="sv").
+# ---------------------------------------------------------------------------
+
+import dataclasses  # noqa: E402
+
+
+def _tvg_frame(amp, X=30.0, ofs=30.0, c=1500.0, fs=750.0):
+    """A frame carrying the applied-TVG constants (c=1500/fs=750 -> 1 m/sample)."""
+    fr = make_frame(amp, angles_deg=[0.0] * np.asarray(amp).shape[0],
+                    detected_samples=[0] * np.asarray(amp).shape[0], c=c, fs=fs)
+    return dataclasses.replace(fr, tvg_function_x=X, tvg_offset_db=ofs)
+
+
+def test_sv_relative_reexpresses_spreading_law():
+    # Sv = amp - OFS + (20 - X) log10(R); X=30, OFS=30, R[k]=k m.
+    fr = _tvg_frame(np.zeros((1, 100)), X=30.0, ofs=30.0)
+    out = wn.sv_relative(fr, absorption_db_km=0.0)
+    for k in (10, 50, 90):
+        assert out.amp_db[0, k] == pytest.approx(-30.0 + (20.0 - 30.0) * np.log10(k))
+    assert np.isnan(out.amp_db[0, 0])  # R=0 near-field -> NaN
+
+
+def test_sv_relative_absorption_adds_two_alpha_r():
+    fr = _tvg_frame(np.zeros((1, 100)))
+    base = wn.sv_relative(fr, absorption_db_km=0.0)
+    absd = wn.sv_relative(fr, absorption_db_km=10.0)      # 10 dB/km
+    # At R=50 m two-way: 2 * (10/1000) * 50 = +1.0 dB
+    assert absd.amp_db[0, 50] - base.amp_db[0, 50] == pytest.approx(1.0)
+
+
+def test_sv_relative_requires_applied_tvg():
+    fr = make_frame(np.zeros((1, 10)), angles_deg=[0.0], detected_samples=[0])  # no TVG
+    with pytest.raises(ValueError, match="TVGfunctionApplied"):
+        wn.sv_relative(fr)
+    # normalize_frame(method="sv") routes to the same guard.
+    with pytest.raises(ValueError, match="TVGfunctionApplied"):
+        wn.normalize_frame(fr, method="sv")
+
+
+def test_sv_via_normalize_frame_matches_direct():
+    fr = _tvg_frame(np.full((2, 60), -12.0))
+    a = wn.sv_relative(fr, absorption_db_km=5.0)
+    b = wn.normalize_frame(fr, method="sv", absorption_db_km=5.0)
+    np.testing.assert_array_equal(np.nan_to_num(a.amp_db, nan=-999),
+                                  np.nan_to_num(b.amp_db, nan=-999))

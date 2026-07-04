@@ -38,9 +38,14 @@ from typing import Optional, Tuple
 import numpy as np
 
 from mbes_tools.water_column import water_column_water_mask
-from mbes_tools.wc_diagnostics import WCFrame
+from mbes_tools.wc_diagnostics import WCFrame, range_axis
 
-NORMALIZE_METHODS = ("none", "empirical")
+NORMALIZE_METHODS = ("none", "empirical", "sv")
+
+# Volume-scattering (Sv) spreading law: 20·log10(R). The seafloor/reflectivity
+# default the instrument applies is 30·log10(R) (Kongsberg TVGfunctionApplied),
+# so the Sv re-expression adds (20 − X)·log10(R).
+_SV_TVG = 20.0
 
 
 @dataclass
@@ -102,6 +107,41 @@ def detrend_amplitude(
     )
 
 
+def sv_relative(
+    frame: WCFrame, *, absorption_db_km: float = 0.0, target_tvg: float = _SV_TVG
+) -> WCFrame:
+    """Re-express the frame's amplitude as **relative volume-scattering ``Sv``**.
+
+    The logged amplitude has the instrument's ``X·log10(R)`` TVG applied
+    (``X`` = ``TVGfunctionApplied``, default 30 — a seafloor/reflectivity law) plus
+    a constant offset ``OFS`` (``TVGoffset_dB``). Volume scattering wants the
+    ``20·log10(R)`` law, so per one-way slant range ``R`` (from ``c·k/(2·fs)``):
+
+        Sv_rel = amp_dB − OFS + (target_tvg − X)·log10(R) + 2·α·R
+
+    ``α`` is the absorption coefficient (``absorption_db_km`` → dB/m); it is **not**
+    in ``#MWC``/``k`` (only on the ``.all``/``.wcd`` runtime datagram), so it is
+    supplied explicitly and defaults to 0. This is a **relative** quantity: the
+    source level and equivalent beam solid angle needed for absolute ``Sv`` are not
+    in these datagrams, so an unknown constant remains — only the range dependence
+    is corrected. Raises if the frame lacks the applied-TVG constants (e.g. a
+    synthetic frame).
+    """
+    X, ofs = frame.tvg_function_x, frame.tvg_offset_db
+    if X is None or ofs is None:
+        raise ValueError(
+            "Sv normalization needs the applied-TVG constants (TVGfunctionApplied, "
+            "TVGoffset_dB) from the #MWC/k datagram, which this frame does not carry."
+        )
+    r = range_axis(frame.width, frame.sound_speed_m_s, frame.sample_freq_hz)  # one-way R [width]
+    alpha_db_m = absorption_db_km / 1000.0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        logr = np.where(r > 0, np.log10(np.where(r > 0, r, 1.0)), np.nan)
+    corr = (target_tvg - float(X)) * logr + 2.0 * alpha_db_m * r  # [width]
+    sv = frame.amp_db - float(ofs) + corr[None, :]
+    return dataclasses.replace(frame, amp_db=sv)
+
+
 def normalize_frame(
     frame: WCFrame,
     *,
@@ -111,20 +151,25 @@ def normalize_frame(
     min_range_m: float = 0.0,
     bottom_guard_samples: int = 5,
     bottom_guard_m: Optional[float] = None,
+    absorption_db_km: float = 0.0,
 ) -> WCFrame:
     """Return a copy of ``frame`` with acquisition gain removed from ``amp_db``.
 
     ``method="none"`` returns the frame unchanged. ``method="empirical"`` builds
     the open-water mask (:func:`water_column_water_mask`, honouring the same
     near-field / seafloor guards as the anomaly detector) and de-trends via
-    :func:`detrend_amplitude`. All other frame fields (angles, bottom detection,
-    sound speed, sample rate, phase, label) are preserved, so the normalized frame
-    drops straight into gridding / georeferencing / the viewer.
+    :func:`detrend_amplitude`. ``method="sv"`` re-expresses the amplitude as
+    relative volume-scattering ``Sv`` (:func:`sv_relative`, using the recorded
+    applied-TVG constants + ``absorption_db_km``). All other frame fields (angles,
+    bottom detection, sound speed, sample rate, phase, label) are preserved, so the
+    normalized frame drops straight into gridding / georeferencing / the viewer.
     """
     if method not in NORMALIZE_METHODS:
         raise ValueError(f"normalize method must be one of {NORMALIZE_METHODS}, got {method!r}")
     if method == "none":
         return frame
+    if method == "sv":
+        return sv_relative(frame, absorption_db_km=absorption_db_km)
 
     guard = bottom_guard_samples
     if bottom_guard_m is not None:

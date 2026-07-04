@@ -260,6 +260,7 @@ class WaterColumnFileView:
         on_uncovered: str = "skip",
         coverage_tol_s: float = 2.0,
         normalize: Optional[str] = None,
+        absorption_db_km: float = 0.0,
         clean_water: bool = False,
         msr_guard_m: float = 0.0,
         msr_percentile: float = 0.0,
@@ -284,7 +285,7 @@ class WaterColumnFileView:
         # first the clean-water (minimum-slant-range) cut, then the empirical de-trend.
         from mbes_tools.water_column import apply_min_slant_range
         from mbes_tools.water_column_normalize import frame_normalizer
-        normalizer = frame_normalizer(normalize)
+        normalizer = frame_normalizer(normalize, absorption_db_km=absorption_db_km)
         _decode = frame_fn
 
         def frame_fn(raw, _d=_decode):
@@ -815,9 +816,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     help="out-of-range samples: clamp to end colours (default) or cut (transparent)")
     ap.add_argument("--swath", type=float, nargs=2, metavar=("LO", "HI"), default=None,
                     help="initial across-track band (m, +port) feeding the stack")
-    ap.add_argument("--normalize", choices=["none", "empirical"], default="none",
-                    help="empirical: de-trend each ping (per-range + per-beam-angle acquisition "
-                         "gain, median polish over open water) so midwater structure stands out")
+    ap.add_argument("--normalize", choices=["none", "empirical", "sv"], default="none",
+                    help="empirical: median-polish de-trend (per-range + per-beam-angle) over open "
+                         "water. sv: relative volume-scattering Sv (undo applied X·logR, re-apply "
+                         "20·logR + 2·alpha·R). Both relative dB, not absolutely calibrated.")
+    ap.add_argument("--absorption", type=float, default=0.0, metavar="DB_PER_KM",
+                    help="absorption (dB/km) for --normalize sv; default 0 (spreading law only)")
     ap.add_argument("--clean-water", action="store_true",
                     help="keep only the bottom-sidelobe-free water column (drop samples at/beyond "
                          "the ping's minimum bottom-detect slant range)")
@@ -845,6 +849,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         allow_incomplete=args.allow_incomplete,
         on_uncovered=args.on_uncovered,
         normalize=args.normalize,
+        absorption_db_km=args.absorption,
         clean_water=args.clean_water,
         msr_guard_m=args.msr_guard_m,
         msr_percentile=args.msr_percentile,

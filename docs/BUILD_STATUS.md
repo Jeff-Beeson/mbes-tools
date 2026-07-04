@@ -37,11 +37,14 @@ at **v0.16.0**, and **Slice 5 — minimum-slant-range "clean water column" filte
 (`--clean-water` [+ `--msr-guard-m` / `--msr-percentile`] on **all three** products —
 `mbes-wc-mosaic`/`-grid`/`-viewer`; drops samples at/beyond the ping's shortest
 bottom-detect slant range where the nadir seafloor sidelobe contaminates every
-beam; `mbes_tools.water_column.apply_min_slant_range`) at **v0.17.0**. The catalog
-EM-model rewire also merged (v0.16.1). The optional-GPU path was dropped by request;
-the **semi-physical relative-`Sv`** normalization (recorded TVG law + supplied
-absorption) remains the deferred follow-up. **D2** (native GSF reader) remains in
-the backlog below.
+beam; `mbes_tools.water_column.apply_min_slant_range`) at **v0.17.0**, and **Slice 6
+— relative-`Sv` normalization** (`--normalize sv` [+ `--absorption`] on all three
+products: undo the applied `X·logR` TVG — `X`=`TVGfunctionApplied`, validated
+against the Kongsberg KMALL spec — and re-apply the `20·logR` volume law + `2αR`;
+relative dB, absolute `Sv` unreachable from these files) at **v0.18.0** (**283
+passed / 3 skipped**). The catalog EM-model rewire also merged (v0.16.1). The
+optional-GPU path was dropped by request. **D2** (native GSF reader) is now the top
+of the backlog below.
 
 > Read this together with `docs/UPGRADE_PLAN.md` (the spec),
 > `docs/VERIFICATION_DATA.md` (the real-data corpus + how to regenerate the

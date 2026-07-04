@@ -986,3 +986,57 @@ def test_clean_water_parallel_matches_serial():
         np.nan_to_num(serial.amplitude_db, nan=-999),
         np.nan_to_num(parallel.amplitude_db, nan=-999),
     )
+
+
+# ---------------------------------------------------------------------------
+# 10. Relative-Sv normalization (--normalize sv) wired through the mosaic.
+# ---------------------------------------------------------------------------
+
+
+def test_frame_from_mwc_carries_applied_tvg():
+    """The real #MWC frame must carry TVGfunctionApplied/TVGoffset so Sv works."""
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    from mbes_tools.kmwcd import iter_mwc_datagrams
+    from mbes_tools.wc_diagnostics import frame_from_mwc
+    frame = frame_from_mwc(next(iter_mwc_datagrams(fx)))
+    assert frame.tvg_function_x is not None and frame.tvg_offset_db is not None
+    assert frame.tvg_function_x > 0  # a real X log R constant (e.g. 30)
+
+
+def test_normalize_sv_keeps_footprint_changes_values():
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    kw = dict(projector="local", cell_m=25.0, auto_companion=False, on_uncovered="clamp")
+    raw = wg.build_mosaic_from_kmall(fx, **kw)
+    sv = wg.build_mosaic_from_kmall(fx, normalize="sv", **kw)
+    assert np.array_equal(np.isfinite(raw.amplitude_db), np.isfinite(sv.amplitude_db))
+    assert not np.allclose(np.nan_to_num(raw.amplitude_db), np.nan_to_num(sv.amplitude_db))
+
+
+def test_normalize_sv_absorption_boosts_deep_returns():
+    """+2·alpha·R grows with range, so alpha>0 shifts the (deep) mosaic upward vs alpha=0."""
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    kw = dict(projector="local", cell_m=25.0, auto_companion=False, on_uncovered="clamp",
+              normalize="sv")
+    a0 = wg.build_mosaic_from_kmall(fx, absorption_db_km=0.0, **kw)
+    a8 = wg.build_mosaic_from_kmall(fx, absorption_db_km=8.0, **kw)
+    assert np.nanmedian(a8.amplitude_db) > np.nanmedian(a0.amplitude_db)
+
+
+def test_normalize_sv_parallel_matches_serial():
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    kw = dict(projector="local", cell_m=25.0, auto_companion=False, on_uncovered="clamp",
+              normalize="sv", absorption_db_km=8.0)
+    serial = wg.build_composite_mosaic([fx, fx], workers=1, **kw)
+    parallel = wg.build_composite_mosaic([fx, fx], workers=2, **kw)
+    np.testing.assert_array_equal(
+        np.nan_to_num(serial.amplitude_db, nan=-999),
+        np.nan_to_num(parallel.amplitude_db, nan=-999),
+    )

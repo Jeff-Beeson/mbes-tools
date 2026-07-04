@@ -142,6 +142,13 @@ class WCFrame:
     phase_flag: int
     sector_freqs_hz: List[float]
     label: str
+    # Applied TVG, for re-expressing amplitude as relative Sv (see
+    # mbes_tools.water_column_normalize). ``tvg_function_x`` is Kongsberg
+    # ``TVGfunctionApplied`` — the X in the applied "X log R" gain (default 30);
+    # ``tvg_offset_db`` is ``TVGoffset_dB`` (OFS). ``None`` when unknown (e.g. a
+    # synthetic frame), which the Sv path rejects with a clear error.
+    tvg_function_x: Optional[float] = None
+    tvg_offset_db: Optional[float] = None
 
     @property
     def width(self) -> int:
@@ -168,6 +175,8 @@ def frame_from_mwc(dgm, label: Optional[str] = None) -> WCFrame:
         phase_flag=int(dgm.phase_flag),
         sector_freqs_hz=[s.centre_freq_hz for s in dgm.tx_sectors],
         label=label or f"EM{dgm.echo_sounder_id} #MWC ping {dgm.ping_cnt} (phaseFlag {dgm.phase_flag})",
+        tvg_function_x=float(dgm.tvg_function_applied),
+        tvg_offset_db=float(dgm.tvg_offset_db),
     )
 
 
@@ -186,6 +195,8 @@ def frame_from_wcd(dgm, label: Optional[str] = None) -> WCFrame:
         phase_flag=0,
         sector_freqs_hz=[s.centre_frequency_hz for s in dgm.tx_sectors],
         label=label or f"EM .wcd k ping {dgm.counter} ({dgm.num_tx_sectors} sectors)",
+        tvg_function_x=float(dgm.tvg_function),
+        tvg_offset_db=float(dgm.tvg_offset_db),
     )
 
 

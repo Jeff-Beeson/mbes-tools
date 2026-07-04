@@ -631,6 +631,7 @@ def generate(
     min_range_m: float = 0.0,
     max_depth_m: Optional[float] = None,
     normalize: Optional[str] = None,
+    absorption_db_km: float = 0.0,
     clean_water: bool = False,
     msr_guard_m: float = 0.0,
     msr_percentile: float = 0.0,
@@ -647,7 +648,7 @@ def generate(
     # Lazy import avoids a circular import (water_column_normalize imports this).
     from mbes_tools.water_column_normalize import frame_normalizer
 
-    normalizer = frame_normalizer(normalize)
+    normalizer = frame_normalizer(normalize, absorption_db_km=absorption_db_km)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     made: List[Path] = []
@@ -718,9 +719,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                          "(on top of the sample-based near-field guard).")
     ap.add_argument("--max-depth-m", type=float, default=None,
                     help="Clip the gridded echogram below this depth.")
-    ap.add_argument("--normalize", choices=["none", "empirical"], default="none",
-                    help="Remove per-range + per-beam-angle acquisition gain (median polish over "
-                         "the open water) before gridding. Relative dB, not calibrated Sv.")
+    ap.add_argument("--normalize", choices=["none", "empirical", "sv"], default="none",
+                    help="Remove acquisition gain before gridding. 'empirical': median-polish "
+                         "de-trend (per-range + per-beam-angle) over the open water. 'sv': relative "
+                         "volume-scattering Sv (undo applied X·logR, re-apply 20·logR + 2·alpha·R). "
+                         "Both relative dB, not absolutely calibrated.")
+    ap.add_argument("--absorption", type=float, default=0.0, metavar="DB_PER_KM",
+                    help="Absorption (dB/km) for --normalize sv; default 0 (spreading law only).")
     ap.add_argument("--clean-water", action="store_true",
                     help="Keep only the bottom-sidelobe-free water column: drop samples at/beyond "
                          "the ping's minimum bottom-detect slant range (the nadir range).")
@@ -736,7 +741,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         args.output, mwc_files=args.mwc, wcd_files=args.wcd,
         reduce=args.reduce, threshold_db=args.threshold_db,
         min_range_m=args.min_range_m, max_depth_m=args.max_depth_m,
-        normalize=args.normalize, clean_water=args.clean_water,
+        normalize=args.normalize, absorption_db_km=args.absorption,
+        clean_water=args.clean_water,
         msr_guard_m=args.msr_guard_m, msr_percentile=args.msr_percentile,
     )
     print(f"\nWrote {len(made)} panel(s) to {args.output}")
