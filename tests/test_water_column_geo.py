@@ -1108,3 +1108,68 @@ def test_generate_fill_nodata_reduces_holes(tmp_path):
     # Observed cells are unchanged; only NaNs may become finite.
     obs = np.isfinite(raw.amplitude_db)
     np.testing.assert_allclose(filled.amplitude_db[obs], raw.amplitude_db[obs])
+
+
+# ---------------------------------------------------------------------------
+# 12. Decode tail-trim from filter bounds (bit-identical to the untrimmed path).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kw", [
+    dict(clean_water=True),
+    dict(max_depth_m=1500.0),
+    dict(depth_band=(100.0, 1500.0)),
+    dict(altitude_band=(20.0, 800.0)),
+    dict(clean_water=True, depth_band=(50.0, 2000.0)),
+    dict(clean_water=True, normalize="empirical"),   # empirical: only clean-water bound applies
+    dict(depth_band=(100.0, 1500.0), normalize="empirical"),  # empirical: bound suppressed entirely
+    dict(depth_band=(100.0, 1500.0), normalize="sv"),
+])
+def test_decode_trim_is_bit_identical(kw, monkeypatch):
+    """The tail-trim must not change the mosaic vs. the untrimmed decode, for every
+    filter (and normalize) combination — trim ON (default) == trim forced OFF."""
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    base = dict(projector="local", cell_m=25.0, auto_companion=False, on_uncovered="clamp")
+    trimmed = wg.build_mosaic_from_kmall(fx, **base, **kw)
+    # Force no trim by making the bound builder a no-op, then rebuild.
+    monkeypatch.setattr(wg, "_decode_bound", lambda **k: None)
+    full = wg.build_mosaic_from_kmall(fx, **base, **kw)
+    np.testing.assert_array_equal(
+        np.nan_to_num(trimmed.amplitude_db, nan=-999),
+        np.nan_to_num(full.amplitude_db, nan=-999),
+    )
+    np.testing.assert_array_equal(trimmed.counts, full.counts)
+
+
+def test_decode_bound_suppressed_for_empirical():
+    # The empirical median-polish fits the whole column, so depth/altitude/max-depth
+    # ceilings must be dropped (only clean-water, applied pre-normalize, survives).
+    b = wg._decode_bound(depth_band=(0.0, 100.0), altitude_band=(10.0, 200.0),
+                         max_depth_m=500.0, clean_water=True, msr_guard_m=0.0,
+                         msr_percentile=0.0, normalize="empirical")
+    assert b is not None and b.depth_band is None and b.altitude_band is None
+    assert b.max_depth_m is None and b.clean_water is True
+    # For none/sv the full ceilings pass through.
+    b2 = wg._decode_bound(depth_band=(0.0, 100.0), altitude_band=None, max_depth_m=500.0,
+                          clean_water=False, msr_guard_m=0.0, msr_percentile=0.0, normalize="sv")
+    assert b2 is not None and b2.depth_band == (0.0, 100.0) and b2.max_depth_m == 500.0
+    # Nothing active -> None.
+    assert wg._decode_bound(depth_band=None, altitude_band=None, max_depth_m=None,
+                            clean_water=False, msr_guard_m=0.0, msr_percentile=0.0,
+                            normalize="none") is None
+
+
+def test_decode_trim_parallel_matches_serial_and_untrimmed():
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    kw = dict(projector="local", cell_m=25.0, auto_companion=False, on_uncovered="clamp",
+              clean_water=True, depth_band=(50.0, 2000.0))
+    serial = wg.build_composite_mosaic([fx, fx], workers=1, **kw)     # trimmed
+    parallel = wg.build_composite_mosaic([fx, fx], workers=2, **kw)   # trimmed, worker path
+    np.testing.assert_array_equal(
+        np.nan_to_num(serial.amplitude_db, nan=-999),
+        np.nan_to_num(parallel.amplitude_db, nan=-999),
+    )

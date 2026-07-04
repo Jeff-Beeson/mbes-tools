@@ -41,6 +41,7 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 
 from mbes_tools.kmwcd import iter_mwc_datagrams
+from mbes_tools.wc_sample_bound import SampleBoundSpec, sample_upper_bound
 from mbes_tools.wcd import iter_water_column_datagrams
 
 
@@ -70,6 +71,7 @@ def padded_grid(
     nsamps: Sequence[int],
     value_lists: Sequence[Sequence[int]],
     scale: float = 1.0,
+    max_width: Optional[int] = None,
 ) -> np.ndarray:
     """Build a ``[beam, width]`` array of per-beam sample values, NaN-padded.
 
@@ -77,14 +79,23 @@ def padded_grid(
     ``starts[i] : starts[i] + nsamps[i]`` and multiplied by ``scale``;
     positions outside a beam's samples are NaN. ``width`` is
     ``max(start + nsamp)``.
+
+    ``max_width`` caps the grid at that many range samples (a **tail trim**): each
+    beam contributes only its samples with absolute index ``< max_width`` — the rest
+    are never converted or allocated. Because the sample index stays absolute, the
+    range geometry of every retained sample is unchanged; downstream range/depth
+    filters then reproduce the untrimmed result exactly on the kept samples.
     """
     nb = len(value_lists)
     width = int(max((s + n for s, n in zip(starts, nsamps)), default=0))
+    if max_width is not None:
+        width = min(width, max(int(max_width), 0))
     grid = np.full((nb, width), np.nan)
     for i, vals in enumerate(value_lists):
         s, n = int(starts[i]), int(nsamps[i])
-        if n:
-            grid[i, s:s + n] = np.asarray(vals, dtype=float) * scale
+        keep = n if max_width is None else max(0, min(n, width - s))
+        if keep > 0:
+            grid[i, s:s + keep] = np.asarray(vals[:keep], dtype=float) * scale
     return grid
 
 
@@ -155,21 +166,33 @@ class WCFrame:
         return self.amp_db.shape[1]
 
 
-def frame_from_mwc(dgm, label: Optional[str] = None) -> WCFrame:
-    """Build a :class:`WCFrame` from a parsed ``#MWC`` datagram."""
+def frame_from_mwc(dgm, label: Optional[str] = None,
+                   bound: Optional[SampleBoundSpec] = None) -> WCFrame:
+    """Build a :class:`WCFrame` from a parsed ``#MWC`` datagram.
+
+    ``bound`` (the active water-column filters) lets the grid be tail-trimmed to the
+    upper sample any filter could keep (:func:`sample_upper_bound`) — the retained
+    samples, and thus the mosaic/grid output, are unchanged.
+    """
     starts = [b.start_range_sample_num for b in dgm.beams]
     nsamps = [b.num_sample_data for b in dgm.beams]
-    amp = padded_grid(starts, nsamps, [b.sample_amplitudes_0p5_db for b in dgm.beams], 0.5)
+    angles = np.array([b.beam_point_angle_re_vertical_deg for b in dgm.beams], float)
+    det = np.array([b.detected_range_samples for b in dgm.beams], int)
+    k_max = sample_upper_bound(bound, angles, det,
+                               float(dgm.sound_velocity_m_s), float(dgm.sample_freq_hz))
+    amp = padded_grid(starts, nsamps, [b.sample_amplitudes_0p5_db for b in dgm.beams], 0.5,
+                      max_width=k_max)
     phase = None
     if dgm.phase_flag in (1, 2):
         phase = padded_grid(
-            starts, nsamps, [b.phase_samples for b in dgm.beams], phase_scale_deg(dgm.phase_flag)
+            starts, nsamps, [b.phase_samples for b in dgm.beams], phase_scale_deg(dgm.phase_flag),
+            max_width=k_max,
         )
     return WCFrame(
         amp_db=amp,
         phase_deg=phase,
-        angles_deg=np.array([b.beam_point_angle_re_vertical_deg for b in dgm.beams], float),
-        detected_samples=np.array([b.detected_range_samples for b in dgm.beams], int),
+        angles_deg=angles,
+        detected_samples=det,
         sound_speed_m_s=float(dgm.sound_velocity_m_s),
         sample_freq_hz=float(dgm.sample_freq_hz),
         phase_flag=int(dgm.phase_flag),
@@ -180,16 +203,25 @@ def frame_from_mwc(dgm, label: Optional[str] = None) -> WCFrame:
     )
 
 
-def frame_from_wcd(dgm, label: Optional[str] = None) -> WCFrame:
-    """Build a :class:`WCFrame` from a parsed ``k`` Water Column datagram."""
+def frame_from_wcd(dgm, label: Optional[str] = None,
+                   bound: Optional[SampleBoundSpec] = None) -> WCFrame:
+    """Build a :class:`WCFrame` from a parsed ``k`` Water Column datagram.
+
+    ``bound`` tail-trims the grid to the upper sample the active filters could keep
+    (:func:`sample_upper_bound`); retained samples and output are unchanged.
+    """
     starts = [b.start_range_sample for b in dgm.beams]
     nsamps = [b.number_of_samples for b in dgm.beams]
-    amp = padded_grid(starts, nsamps, [b.samples for b in dgm.beams], 0.5)
+    angles = np.array([b.pointing_angle_deg for b in dgm.beams], float)
+    det = np.array([b.detected_range_samples for b in dgm.beams], int)
+    k_max = sample_upper_bound(bound, angles, det,
+                               float(dgm.sound_speed_m_s), float(dgm.sample_frequency_hz))
+    amp = padded_grid(starts, nsamps, [b.samples for b in dgm.beams], 0.5, max_width=k_max)
     return WCFrame(
         amp_db=amp,
         phase_deg=None,
-        angles_deg=np.array([b.pointing_angle_deg for b in dgm.beams], float),
-        detected_samples=np.array([b.detected_range_samples for b in dgm.beams], int),
+        angles_deg=angles,
+        detected_samples=det,
         sound_speed_m_s=float(dgm.sound_speed_m_s),
         sample_freq_hz=float(dgm.sample_frequency_hz),
         phase_flag=0,
