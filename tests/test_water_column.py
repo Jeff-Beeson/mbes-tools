@@ -268,3 +268,61 @@ def test_generate_panels(tmp_path):
     n = len(mwc) + len(wcd_files)
     assert sum("wc_grid_" in p.name for p in made) == n
     assert sum("wc_anomaly_" in p.name for p in made) == n
+
+
+# ---------------------------------------------------------------------------
+# Minimum-slant-range (clean water column) filter.
+# ---------------------------------------------------------------------------
+
+
+def test_minimum_slant_range_sample_is_shortest_detection():
+    # Bottoms at samples 60, 40, 80 -> R_min = 40. A no-bottom beam (0) is ignored.
+    det = np.array([60, 40, 0, 80])
+    assert wcp.minimum_slant_range_sample(det) == 40
+    # No detection anywhere -> None (no reference).
+    assert wcp.minimum_slant_range_sample(np.zeros(4, dtype=int)) is None
+
+
+def test_apply_min_slant_range_cuts_at_shortest_bottom():
+    # 3 beams, 100 samples, all finite; bottoms at 70, 50, 90 -> R_min sample = 50.
+    amp = np.zeros((3, 100))
+    frame = make_frame(amp, angles_deg=[-20.0, 0.0, 20.0], detected_samples=[70, 50, 90])
+    out = wcp.apply_min_slant_range(frame)
+    # Samples < 50 kept (finite) on every beam; samples >= 50 are NaN on every beam.
+    assert np.isfinite(out.amp_db[:, :50]).all()
+    assert np.isnan(out.amp_db[:, 50:]).all()
+    # Original frame is untouched (returns a copy).
+    assert np.isfinite(frame.amp_db).all()
+
+
+def test_apply_min_slant_range_guard_pulls_cutoff_inward():
+    amp = np.zeros((2, 100))
+    # c=1500/fs=750 -> 1 m per sample; guard 10 m -> 10 samples inward from R_min=50.
+    frame = make_frame(amp, angles_deg=[0.0, 10.0], detected_samples=[50, 60])
+    out = wcp.apply_min_slant_range(frame, guard_m=10.0)
+    assert np.isfinite(out.amp_db[:, :40]).all()
+    assert np.isnan(out.amp_db[:, 40:]).all()
+
+
+def test_apply_min_slant_range_no_bottom_is_passthrough():
+    amp = np.zeros((2, 30))
+    frame = make_frame(amp, angles_deg=[0.0, 5.0], detected_samples=[0, 0])
+    out = wcp.apply_min_slant_range(frame)
+    assert out is frame  # no R_min reference -> unchanged
+
+
+def test_minimum_slant_range_percentile_is_more_forgiving():
+    # One shallow outlier (30) would shrink the cone under the strict min;
+    # a percentile ignores it, giving a larger (more forgiving) R_min.
+    det = np.array([30, 80, 82, 84, 86])
+    assert wcp.minimum_slant_range_sample(det) == 30                 # strict min
+    assert wcp.minimum_slant_range_sample(det, percentile=25) > 30   # relaxed off the outlier
+
+
+def test_apply_min_slant_range_percentile_keeps_more_samples():
+    amp = np.zeros((5, 120))
+    frame = make_frame(amp, angles_deg=[-40, -20, 0, 20, 40],
+                       detected_samples=[30, 80, 82, 84, 86])
+    strict = wcp.apply_min_slant_range(frame)                        # cutoff 30
+    relaxed = wcp.apply_min_slant_range(frame, percentile=25)        # cutoff > 30
+    assert np.isfinite(strict.amp_db).sum() < np.isfinite(relaxed.amp_db).sum()

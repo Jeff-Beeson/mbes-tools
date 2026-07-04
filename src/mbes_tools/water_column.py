@@ -355,6 +355,59 @@ def water_column_water_mask(
     return mask
 
 
+def minimum_slant_range_sample(
+    detected_samples: np.ndarray, *, percentile: float = 0.0
+) -> Optional[int]:
+    """Sample index of the ping's **shortest** bottom detection (``R_min``).
+
+    Across a ping the seafloor is detected at different slant ranges; the shortest
+    (the nadir range, for a flat bottom) is where the bottom's sidelobe energy
+    arrives in *every* beam. Returns that sample index, or ``None`` when no beam
+    detected a bottom (no reference to define the clean zone).
+
+    ``percentile`` (0–100) trades strictness for robustness on sloped/rough
+    seafloor: ``0`` (default) is the true minimum (fully sidelobe-safe, but one
+    shallow outer beam shrinks the clean cone for the whole ping); a small
+    percentile (e.g. ``1``) ignores the very shallowest outliers, admitting a
+    little more potential contamination in exchange for a larger, steadier cone.
+    """
+    valid = detected_samples[detected_samples > 0]
+    if not valid.size:
+        return None
+    if percentile <= 0:
+        return int(valid.min())
+    return int(np.percentile(valid, percentile))
+
+
+def apply_min_slant_range(
+    frame: WCFrame, *, guard_m: float = 0.0, percentile: float = 0.0
+) -> WCFrame:
+    """Return a copy of ``frame`` keeping only the bottom-sidelobe-free water column.
+
+    Samples at or beyond the ping's minimum bottom-detect slant range ``R_min``
+    (:func:`minimum_slant_range_sample`) are set to ``NaN`` — this is the standard
+    **minimum-slant-range** ("clean water column") filter: beyond ``R_min`` every
+    beam may carry the nadir seafloor's sidelobe, so only the near-range arc below
+    ``R_min`` is trustworthy. Because slant range is monotonic in sample index and
+    the range axis is common to all beams, the cut is a single column index applied
+    to every beam. ``guard_m`` pulls the cutoff inward by that many metres (via the
+    per-ping range resolution) to stay clear of the sidelobe onset; ``percentile``
+    relaxes ``R_min`` off the strict minimum (see
+    :func:`minimum_slant_range_sample`). A ping with no bottom detection anywhere is
+    returned unchanged (no ``R_min`` reference).
+    """
+    cutoff = minimum_slant_range_sample(frame.detected_samples, percentile=percentile)
+    if cutoff is None:
+        return frame
+    if guard_m:
+        c, fs = frame.sound_speed_m_s, frame.sample_freq_hz
+        cutoff -= max(0, int(round(2.0 * fs * guard_m / c)))
+    cutoff = max(cutoff, 0)
+    amp = frame.amp_db.copy()
+    amp[:, cutoff:] = np.nan
+    return dataclasses.replace(frame, amp_db=amp)
+
+
 def detect_anomalies(
     frame: WCFrame,
     *,
@@ -578,14 +631,18 @@ def generate(
     min_range_m: float = 0.0,
     max_depth_m: Optional[float] = None,
     normalize: Optional[str] = None,
+    clean_water: bool = False,
+    msr_guard_m: float = 0.0,
+    msr_percentile: float = 0.0,
 ) -> List[Path]:
     """Grid + anomaly panels for the first ping of each supplied file.
 
     ``.wcd`` files are reassembled by ``counter`` first, so the first ping is a
-    full swath. ``normalize="empirical"`` de-trends each ping's amplitude (per-range
-    + per-beam-angle acquisition gain) before gridding. Returns the saved PNG
-    paths; a failing panel is reported but does not abort the rest. Prints the
-    per-ping anomaly summary.
+    full swath. ``clean_water`` first keeps only the bottom-sidelobe-free water
+    column (:func:`apply_min_slant_range`), then ``normalize="empirical"`` de-trends
+    each ping's amplitude (per-range + per-beam-angle acquisition gain) before
+    gridding. Returns the saved PNG paths; a failing panel is reported but does not
+    abort the rest. Prints the per-ping anomaly summary.
     """
     # Lazy import avoids a circular import (water_column_normalize imports this).
     from mbes_tools.water_column_normalize import frame_normalizer
@@ -605,6 +662,8 @@ def generate(
             print("FAIL", getattr(fn, "__name__", fn), "->", type(exc).__name__, str(exc)[:120])
 
     def handle(frame: WCFrame, stem: str):
+        if clean_water:
+            frame = apply_min_slant_range(frame, guard_m=msr_guard_m, percentile=msr_percentile)
         if normalizer is not None:
             frame = normalizer(frame)
         grid = grid_frame(frame, reduce=reduce, max_depth_m=max_depth_m)
@@ -662,6 +721,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     ap.add_argument("--normalize", choices=["none", "empirical"], default="none",
                     help="Remove per-range + per-beam-angle acquisition gain (median polish over "
                          "the open water) before gridding. Relative dB, not calibrated Sv.")
+    ap.add_argument("--clean-water", action="store_true",
+                    help="Keep only the bottom-sidelobe-free water column: drop samples at/beyond "
+                         "the ping's minimum bottom-detect slant range (the nadir range).")
+    ap.add_argument("--msr-guard-m", type=float, default=0.0, metavar="M",
+                    help="With --clean-water, pull the cutoff inward by M metres (default 0).")
+    ap.add_argument("--msr-percentile", type=float, default=0.0, metavar="P",
+                    help="With --clean-water, use the Pth-percentile bottom range instead of the "
+                         "strict minimum (default 0 = true minimum; small P is gentler on slopes).")
     args = ap.parse_args(argv)
     if not args.mwc and not args.wcd:
         ap.error("supply at least one --mwc or --wcd file")
@@ -669,7 +736,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         args.output, mwc_files=args.mwc, wcd_files=args.wcd,
         reduce=args.reduce, threshold_db=args.threshold_db,
         min_range_m=args.min_range_m, max_depth_m=args.max_depth_m,
-        normalize=args.normalize,
+        normalize=args.normalize, clean_water=args.clean_water,
+        msr_guard_m=args.msr_guard_m, msr_percentile=args.msr_percentile,
     )
     print(f"\nWrote {len(made)} panel(s) to {args.output}")
 

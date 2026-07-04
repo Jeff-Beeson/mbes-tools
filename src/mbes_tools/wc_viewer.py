@@ -260,6 +260,9 @@ class WaterColumnFileView:
         on_uncovered: str = "skip",
         coverage_tol_s: float = 2.0,
         normalize: Optional[str] = None,
+        clean_water: bool = False,
+        msr_guard_m: float = 0.0,
+        msr_percentile: float = 0.0,
     ) -> "WaterColumnFileView":
         if on_uncovered not in ("skip", "clamp"):
             raise ValueError("on_uncovered must be 'skip' or 'clamp'")
@@ -276,13 +279,22 @@ class WaterColumnFileView:
         kind, items, time_fn, frame_fn = _file_ping_source(
             path, allow_incomplete=allow_incomplete
         )
-        # Optional empirical de-trend, applied to each decoded frame before it is
-        # collapsed to a fan/stack column (so the stack + fan agree with the mosaic).
+        # Per-frame preprocessing, applied to each decoded frame before it is
+        # collapsed to a fan/stack column (so the stack + fan agree with the mosaic):
+        # first the clean-water (minimum-slant-range) cut, then the empirical de-trend.
+        from mbes_tools.water_column import apply_min_slant_range
         from mbes_tools.water_column_normalize import frame_normalizer
         normalizer = frame_normalizer(normalize)
-        if normalizer is not None:
-            _decode = frame_fn
-            frame_fn = lambda raw, _d=_decode: normalizer(_d(raw))
+        _decode = frame_fn
+
+        def frame_fn(raw, _d=_decode):
+            fr = _d(raw)
+            if clean_water:
+                fr = apply_min_slant_range(fr, guard_m=msr_guard_m, percentile=msr_percentile)
+            if normalizer is not None:
+                fr = normalizer(fr)
+            return fr
+
         lo, hi = nav.time_span
 
         kept: List[PingView] = []
@@ -806,6 +818,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     ap.add_argument("--normalize", choices=["none", "empirical"], default="none",
                     help="empirical: de-trend each ping (per-range + per-beam-angle acquisition "
                          "gain, median polish over open water) so midwater structure stands out")
+    ap.add_argument("--clean-water", action="store_true",
+                    help="keep only the bottom-sidelobe-free water column (drop samples at/beyond "
+                         "the ping's minimum bottom-detect slant range)")
+    ap.add_argument("--msr-guard-m", type=float, default=0.0, metavar="M",
+                    help="with --clean-water, pull the cutoff inward by M metres (default 0)")
+    ap.add_argument("--msr-percentile", type=float, default=0.0, metavar="P",
+                    help="with --clean-water, use the Pth-percentile bottom range vs the strict "
+                         "minimum (default 0; small P is gentler on slopes)")
     ap.add_argument("--save", type=int, metavar="PING", default=None,
                     help="headless: render this ping's linked panels to --out and exit")
     ap.add_argument("-o", "--out", type=Path, default=None,
@@ -825,6 +845,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         allow_incomplete=args.allow_incomplete,
         on_uncovered=args.on_uncovered,
         normalize=args.normalize,
+        clean_water=args.clean_water,
+        msr_guard_m=args.msr_guard_m,
+        msr_percentile=args.msr_percentile,
     )
     print(
         f"{args.path.name}: {view.n_pings} pings "

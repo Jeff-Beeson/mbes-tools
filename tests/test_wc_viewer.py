@@ -326,3 +326,16 @@ def test_status_readouts_over_fan_and_stack():
     stk = viewer._status_over_stack(0, 1200.0)
     assert "ping" in stk and f"{p.lat:+.5f}" in stk
     plt.close(viewer.fig)
+
+
+def test_clean_water_reduces_fan_samples():
+    """--clean-water drops the below-nadir-range samples, so the ping's fan has
+    strictly fewer finite points than the unfiltered view."""
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    full = wv.WaterColumnFileView.from_file(fx, on_uncovered="clamp")
+    clean = wv.WaterColumnFileView.from_file(fx, on_uncovered="clamp", clean_water=True)
+    n_full = full.pings[0].fan_points()[2].size
+    n_clean = clean.pings[0].fan_points()[2].size
+    assert 0 < n_clean < n_full

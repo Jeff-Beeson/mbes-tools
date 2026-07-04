@@ -33,10 +33,15 @@ bit-identical, plus a bit-identical process-pool `--combine --workers N`) at
 **v0.15.0**, and **Slice 4a — empirical normalization** (`mbes_tools.
 water_column_normalize`; `--normalize empirical` on the mosaic/grid/viewer removes
 per-range + per-beam-angle acquisition gain by median polish over the open water)
-at **v0.16.0** (**264 passed / 3 skipped**). The optional-GPU path was dropped by
-request; the **semi-physical relative-`Sv`** normalization (recorded TVG law +
-supplied absorption) is a deferred follow-up. **D2** (native GSF reader) remains
-in the backlog below.
+at **v0.16.0**, and **Slice 5 — minimum-slant-range "clean water column" filter**
+(`--clean-water` [+ `--msr-guard-m` / `--msr-percentile`] on **all three** products —
+`mbes-wc-mosaic`/`-grid`/`-viewer`; drops samples at/beyond the ping's shortest
+bottom-detect slant range where the nadir seafloor sidelobe contaminates every
+beam; `mbes_tools.water_column.apply_min_slant_range`) at **v0.17.0**. The catalog
+EM-model rewire also merged (v0.16.1). The optional-GPU path was dropped by request;
+the **semi-physical relative-`Sv`** normalization (recorded TVG law + supplied
+absorption) remains the deferred follow-up. **D2** (native GSF reader) remains in
+the backlog below.
 
 > Read this together with `docs/UPGRADE_PLAN.md` (the spec),
 > `docs/VERIFICATION_DATA.md` (the real-data corpus + how to regenerate the
