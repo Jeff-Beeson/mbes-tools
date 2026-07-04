@@ -309,3 +309,20 @@ def test_apply_min_slant_range_no_bottom_is_passthrough():
     frame = make_frame(amp, angles_deg=[0.0, 5.0], detected_samples=[0, 0])
     out = wcp.apply_min_slant_range(frame)
     assert out is frame  # no R_min reference -> unchanged
+
+
+def test_minimum_slant_range_percentile_is_more_forgiving():
+    # One shallow outlier (30) would shrink the cone under the strict min;
+    # a percentile ignores it, giving a larger (more forgiving) R_min.
+    det = np.array([30, 80, 82, 84, 86])
+    assert wcp.minimum_slant_range_sample(det) == 30                 # strict min
+    assert wcp.minimum_slant_range_sample(det, percentile=25) > 30   # relaxed off the outlier
+
+
+def test_apply_min_slant_range_percentile_keeps_more_samples():
+    amp = np.zeros((5, 120))
+    frame = make_frame(amp, angles_deg=[-40, -20, 0, 20, 40],
+                       detected_samples=[30, 80, 82, 84, 86])
+    strict = wcp.apply_min_slant_range(frame)                        # cutoff 30
+    relaxed = wcp.apply_min_slant_range(frame, percentile=25)        # cutoff > 30
+    assert np.isfinite(strict.amp_db).sum() < np.isfinite(relaxed.amp_db).sum()
