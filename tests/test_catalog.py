@@ -111,6 +111,48 @@ def test_scan_truncation_flag(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Synthetic .kmall scanning: EM model comes from the #IIP EMXV key
+# (structured via install_params), not a raw-bytes regex scrape.
+# ---------------------------------------------------------------------------
+
+
+def _kmall_iip(emxv: str = "EM712", version: int = 1) -> bytes:
+    """One #IIP datagram whose install text carries EMXV:<model>.
+
+    Mirrors the real Kongsberg framing the scanner + parser expect:
+    20-byte header (<I4sBBHII>), then numBytesCmnPart/info/status (<3H>) where
+    numBytesCmnPart = 6 + len(text), then the null-terminated ASCII text, then a
+    repeated 4-byte length. Matches the committed fixtures' `EMXV:EMxxx` form.
+    """
+    text = f"OSCV:Empty,EMXV:{emxv},\nSN=99999,\n".encode("ascii") + b"\x00"
+    num_bytes_cmn = 6 + len(text)  # <3H> fixed part (6) + the install text
+    body = struct.pack("<3H", num_bytes_cmn, 0, 0) + text
+    total = 20 + len(body) + 4  # 20-byte header + body + trailing 4-byte length
+    header = struct.pack("<I4sBBHII", total, b"#IIP", version, 0, 0, 0, 0)
+    return header + body + struct.pack("<I", total)
+
+
+def test_scan_kmall_model_from_iip_emxv(tmp_path):
+    # Filename carries no model, so a resolved model must come from #IIP EMXV.
+    f = tmp_path / "0001_20230101_000000_line001.kmall"
+    f.write_bytes(_kmall_iip("EM712"))
+
+    row = catalog.scan_kmall_file(f, max_scan_bytes=0)
+    assert row.error == ""
+    assert row.em_model == "EM712"
+    assert "#IIP:1" in row.datagram_types
+
+
+def test_scan_kmall_model_falls_back_to_filename(tmp_path):
+    # No #IIP present -> the filename hint (e.g. *_EM124.kmall) still resolves.
+    f = tmp_path / "0005_20230305_165930_FKt230303_EM124.kmall"
+    f.write_bytes(b"")  # empty; nothing to scan
+
+    row = catalog.scan_kmall_file(f, max_scan_bytes=0)
+    assert row.em_model == "EM124"
+
+
+# ---------------------------------------------------------------------------
 # Discovery and per-directory sampling.
 # ---------------------------------------------------------------------------
 
