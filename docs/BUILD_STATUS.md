@@ -30,9 +30,13 @@ band** (`--altitude-band`, a seafloor-relative complement to `--depth-band`,
 computed from the per-beam bottom detection) at **v0.14.0**, and **Slice 3 —
 gridding performance** (vectorized map-reduce `GeoMosaic`, ~6–10× faster and
 bit-identical, plus a bit-identical process-pool `--combine --workers N`) at
-**v0.15.0** (**253 passed / 3 skipped**). Still planned: TVG/angular
-normalization (see `~/.claude/plans`); the optional-GPU path was dropped by
-request. **D2** (native GSF reader) remains in the backlog below.
+**v0.15.0**, and **Slice 4a — empirical normalization** (`mbes_tools.
+water_column_normalize`; `--normalize empirical` on the mosaic/grid/viewer removes
+per-range + per-beam-angle acquisition gain by median polish over the open water)
+at **v0.16.0** (**264 passed / 3 skipped**). The optional-GPU path was dropped by
+request; the **semi-physical relative-`Sv`** normalization (recorded TVG law +
+supplied absorption) is a deferred follow-up. **D2** (native GSF reader) remains
+in the backlog below.
 
 > Read this together with `docs/UPGRADE_PLAN.md` (the spec),
 > `docs/VERIFICATION_DATA.md` (the real-data corpus + how to regenerate the

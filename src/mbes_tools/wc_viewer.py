@@ -259,6 +259,7 @@ class WaterColumnFileView:
         allow_incomplete: bool = False,
         on_uncovered: str = "skip",
         coverage_tol_s: float = 2.0,
+        normalize: Optional[str] = None,
     ) -> "WaterColumnFileView":
         if on_uncovered not in ("skip", "clamp"):
             raise ValueError("on_uncovered must be 'skip' or 'clamp'")
@@ -275,6 +276,13 @@ class WaterColumnFileView:
         kind, items, time_fn, frame_fn = _file_ping_source(
             path, allow_incomplete=allow_incomplete
         )
+        # Optional empirical de-trend, applied to each decoded frame before it is
+        # collapsed to a fan/stack column (so the stack + fan agree with the mosaic).
+        from mbes_tools.water_column_normalize import frame_normalizer
+        normalizer = frame_normalizer(normalize)
+        if normalizer is not None:
+            _decode = frame_fn
+            frame_fn = lambda raw, _d=_decode: normalizer(_d(raw))
         lo, hi = nav.time_span
 
         kept: List[PingView] = []
@@ -795,6 +803,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     help="out-of-range samples: clamp to end colours (default) or cut (transparent)")
     ap.add_argument("--swath", type=float, nargs=2, metavar=("LO", "HI"), default=None,
                     help="initial across-track band (m, +port) feeding the stack")
+    ap.add_argument("--normalize", choices=["none", "empirical"], default="none",
+                    help="empirical: de-trend each ping (per-range + per-beam-angle acquisition "
+                         "gain, median polish over open water) so midwater structure stands out")
     ap.add_argument("--save", type=int, metavar="PING", default=None,
                     help="headless: render this ping's linked panels to --out and exit")
     ap.add_argument("-o", "--out", type=Path, default=None,
@@ -813,6 +824,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         nadir_halfangle_deg=args.nadir_halfangle_deg,
         allow_incomplete=args.allow_incomplete,
         on_uncovered=args.on_uncovered,
+        normalize=args.normalize,
     )
     print(
         f"{args.path.name}: {view.n_pings} pings "
