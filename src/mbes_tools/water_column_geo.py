@@ -33,8 +33,10 @@ Pieces (core numpy + stdlib; matplotlib lazy; pyproj optional):
 
 3. **`GeoMosaic`** — a streaming plan-view accumulator binning samples onto a
    fixed ``cell_m`` east/north grid, reducing by peak-hold (``max``) or
-   intensity-mean over an optional ``depth_band`` (e.g. a midwater band for
-   plume mapping). ``finalize()`` returns a dense grid + edges + CRS.
+   intensity-mean over an optional ``depth_band`` (absolute depth, e.g. a
+   midwater band for plume mapping) and/or ``altitude_band`` (height above the
+   detected seafloor, e.g. a near-bottom layer that tracks the terrain).
+   ``finalize()`` returns a dense grid + edges + CRS.
 
 Verified against the committed EM124 ``.kmwcd`` + its ``.kmall`` companion and
 the full TN447 pair (matched ``.kmwcd``/``.kmall``, where ``#SKM`` nav spans the
@@ -358,6 +360,7 @@ class GeoSamples:
     pitch_deg: float = 0.0
     heave_m: float = 0.0
     epsg: Optional[int] = None      # real projected EPSG in "utm" mode; None for local ENU
+    height_above_seafloor_m: Optional[np.ndarray] = None  # per sample; NaN where no bottom
 
     def __len__(self) -> int:
         return int(self.easting_m.size)
@@ -423,6 +426,16 @@ def georeference_frame(
         finite &= Z <= max_depth_m
     xs, zs, amp = X[finite], Z[finite], frame.amp_db[finite]
 
+    # Per-sample height above the detected seafloor (for altitude bands). The
+    # seafloor slant range is r_b = c·det/(2·fs); its depth Zb = cos(angle)·r_b,
+    # so height = Zb − Z (positive = above bottom). Beams with no bottom detection
+    # (det == 0, e.g. swath edges) get NaN and drop out of any altitude product.
+    det = frame.detected_samples
+    zb = np.cos(np.radians(frame.angles_deg)) * (c * det / (2.0 * fs))   # [beam]
+    hab_grid = zb[:, None] - Z                                           # [beam, width]
+    hab_grid[det == 0, :] = np.nan
+    habs = hab_grid[finite]
+
     # Lever arm: rigid in the body frame -> rotated by the full vessel pose.
     dcm_full = _dcm(heading, pitch, roll)
     lev_n, lev_e, lev_d = dcm_full @ np.array([fx, fy, fz])
@@ -452,6 +465,7 @@ def georeference_frame(
         pitch_deg=pitch,
         heave_m=heave,
         epsg=epsg if use_pyproj else None,
+        height_above_seafloor_m=habs,
     )
 
 
@@ -475,6 +489,7 @@ class GeoMosaicResult:
     depth_band: Optional[Tuple[float, float]]
     n_uncovered: int = 0          # pings dropped because nav didn't span their time
     epsg: Optional[int] = None    # real projected EPSG (utm mode); None for local ENU
+    altitude_band: Optional[Tuple[float, float]] = None  # metres above seafloor
 
     @property
     def east_centers(self) -> np.ndarray:
@@ -492,8 +507,12 @@ class GeoMosaic:
     into a sparse ``{(iE, iN): value}`` dict as they arrive, then rasterized to a
     dense grid by :meth:`finalize`. ``reduce="max"`` is peak-hold (good for thin
     plume/target returns); ``reduce="mean"`` averages in the linear-intensity
-    domain. ``depth_band`` keeps only samples with ``lo <= depth <= hi`` — set a
-    midwater band to map plumes without the seafloor swamping the peak-hold.
+    domain. ``depth_band`` keeps only samples with ``lo <= depth <= hi`` (absolute
+    depth) — set a midwater band to map plumes without the seafloor swamping the
+    peak-hold. ``altitude_band`` instead keeps samples by height **above the
+    detected seafloor** (``lo <= Zb − Z <= hi``), which follows the terrain rather
+    than a flat depth slice; samples on beams with no bottom detection are dropped.
+    The two bands compose (a sample must satisfy both).
     """
 
     def __init__(
@@ -502,6 +521,7 @@ class GeoMosaic:
         *,
         reduce: str = "max",
         depth_band: Optional[Tuple[float, float]] = None,
+        altitude_band: Optional[Tuple[float, float]] = None,
     ):
         if reduce not in ("max", "mean"):
             raise ValueError(f"reduce must be 'max' or 'mean', got {reduce!r}")
@@ -510,6 +530,7 @@ class GeoMosaic:
         self.cell_m = float(cell_m)
         self.reduce = reduce
         self.depth_band = depth_band
+        self.altitude_band = altitude_band
         self.crs_label: Optional[str] = None
         self.epsg: Optional[int] = None
         self.n_pings = 0
@@ -529,9 +550,22 @@ class GeoMosaic:
             self.epsg = gs.epsg
 
         e, n, d, a = gs.easting_m, gs.northing_m, gs.depth_m, gs.amplitude_db
+        keep = None
         if self.depth_band is not None:
             lo, hi = self.depth_band
             keep = (d >= lo) & (d <= hi)
+        if self.altitude_band is not None:
+            hab = gs.height_above_seafloor_m
+            if hab is None:
+                raise ValueError(
+                    "altitude_band requires GeoSamples.height_above_seafloor_m "
+                    "(produced by georeference_frame); got None"
+                )
+            lo, hi = self.altitude_band
+            # NaN (no bottom detected) fails the comparison, so those samples drop.
+            akeep = np.isfinite(hab) & (hab >= lo) & (hab <= hi)
+            keep = akeep if keep is None else (keep & akeep)
+        if keep is not None:
             e, n, a = e[keep], n[keep], a[keep]
         if e.size == 0:
             return len(self._cells)
@@ -582,6 +616,7 @@ class GeoMosaic:
                 n_pings=self.n_pings,
                 depth_band=self.depth_band,
                 epsg=self.epsg,
+                altitude_band=self.altitude_band,
             )
 
         ies = np.fromiter((k[0] for k in self._cells), dtype=np.int64)
@@ -617,6 +652,7 @@ class GeoMosaic:
             n_pings=self.n_pings,
             depth_band=self.depth_band,
             epsg=self.epsg,
+            altitude_band=self.altitude_band,
         )
 
 
@@ -642,6 +678,8 @@ def panel_mosaic(result: GeoMosaicResult, out: Path, stem: str) -> Path:
     )
     ax.set_aspect("equal", "datalim")
     band = f", depth {result.depth_band[0]:g}–{result.depth_band[1]:g} m" if result.depth_band else ""
+    if result.altitude_band:
+        band += f", {result.altitude_band[0]:g}–{result.altitude_band[1]:g} m above seafloor"
     ax.set(
         xlabel="easting (m)",
         ylabel="northing (m)",
@@ -936,11 +974,12 @@ def _accumulate_mosaic(
     limit: Optional[int],
     apply_attitude: bool = True,
     stabilized_beams: bool = True,
+    altitude_band: Optional[Tuple[float, float]] = None,
 ) -> GeoMosaicResult:
     """Single-file wrapper over :func:`_accumulate_into` (own mosaic + anchor)."""
     if on_uncovered not in ("skip", "clamp"):
         raise ValueError(f"on_uncovered must be 'skip' or 'clamp', got {on_uncovered!r}")
-    mosaic = GeoMosaic(cell_m, reduce=reduce, depth_band=depth_band)
+    mosaic = GeoMosaic(cell_m, reduce=reduce, depth_band=depth_band, altitude_band=altitude_band)
     n_uncovered = _accumulate_into(
         mosaic, [None], items, time_fn, frame_fn, nav, install=install,
         projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
@@ -965,6 +1004,7 @@ def build_mosaic_from_kmall(
     cell_m: float = 25.0,
     reduce: str = "max",
     depth_band: Optional[Tuple[float, float]] = None,
+    altitude_band: Optional[Tuple[float, float]] = None,
     projector: str = "auto",
     max_depth_m: Optional[float] = None,
     on_uncovered: str = "skip",
@@ -998,6 +1038,7 @@ def build_mosaic_from_kmall(
     return _accumulate_mosaic(
         path, iter_mwc_datagrams(path), _mwc_time, frame_from_mwc, nav, install,
         kind="#MWC", cell_m=cell_m, reduce=reduce, depth_band=depth_band,
+        altitude_band=altitude_band,
         projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
         coverage_tol_s=coverage_tol_s, limit=limit,
         apply_attitude=apply_attitude, stabilized_beams=stabilized_beams,
@@ -1015,6 +1056,7 @@ def build_mosaic_from_wcd(
     cell_m: float = 25.0,
     reduce: str = "max",
     depth_band: Optional[Tuple[float, float]] = None,
+    altitude_band: Optional[Tuple[float, float]] = None,
     projector: str = "auto",
     max_depth_m: Optional[float] = None,
     on_uncovered: str = "skip",
@@ -1047,6 +1089,7 @@ def build_mosaic_from_wcd(
     return _accumulate_mosaic(
         path, pings, lambda p: _all_header_time(p.header), frame_from_wcd, nav, install,
         kind="k", cell_m=cell_m, reduce=reduce, depth_band=depth_band,
+        altitude_band=altitude_band,
         projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
         coverage_tol_s=coverage_tol_s, limit=limit,
         apply_attitude=apply_attitude, stabilized_beams=stabilized_beams,
@@ -1092,6 +1135,7 @@ def build_composite_mosaic(
     cell_m: float = 25.0,
     reduce: str = "max",
     depth_band: Optional[Tuple[float, float]] = None,
+    altitude_band: Optional[Tuple[float, float]] = None,
     projector: str = "auto",
     max_depth_m: Optional[float] = None,
     on_uncovered: str = "skip",
@@ -1115,7 +1159,7 @@ def build_composite_mosaic(
     """
     if on_uncovered not in ("skip", "clamp"):
         raise ValueError(f"on_uncovered must be 'skip' or 'clamp', got {on_uncovered!r}")
-    mosaic = GeoMosaic(cell_m, reduce=reduce, depth_band=depth_band)
+    mosaic = GeoMosaic(cell_m, reduce=reduce, depth_band=depth_band, altitude_band=altitude_band)
     anchor_ref: List[Optional[Tuple[float, float]]] = [None]
     total_uncovered = 0
     for p in paths:
@@ -1157,6 +1201,7 @@ def generate(
     cell_m: float = 25.0,
     reduce: str = "max",
     depth_band: Optional[Tuple[float, float]] = None,
+    altitude_band: Optional[Tuple[float, float]] = None,
     projector: str = "auto",
     max_depth_m: Optional[float] = None,
     on_uncovered: str = "skip",
@@ -1182,7 +1227,8 @@ def generate(
         result = build_composite_mosaic(
             files, nav_paths=nav_paths, install_paths=install_paths,
             auto_companion=auto_companion, cell_m=cell_m, reduce=reduce,
-            depth_band=depth_band, projector=projector, max_depth_m=max_depth_m,
+            depth_band=depth_band, altitude_band=altitude_band,
+            projector=projector, max_depth_m=max_depth_m,
             on_uncovered=on_uncovered, apply_attitude=apply_attitude,
             stabilized_beams=stabilized_beams, limit=limit, verbose=True,
         )
@@ -1210,6 +1256,7 @@ def generate(
             result = build_mosaic(
                 Path(f), nav=nav, install_paths=install_paths, auto_companion=auto_companion,
                 cell_m=cell_m, reduce=reduce, depth_band=depth_band,
+                altitude_band=altitude_band,
                 projector=projector, max_depth_m=max_depth_m,
                 on_uncovered=on_uncovered, apply_attitude=apply_attitude,
                 stabilized_beams=stabilized_beams, limit=limit,
@@ -1265,6 +1312,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     help="Cell aggregation over depth: peak-hold max (default) or intensity-mean.")
     ap.add_argument("--depth-band", default=None, metavar="LO:HI",
                     help="Keep only samples with depth in [LO,HI] m (e.g. 200:2000 for a midwater band).")
+    ap.add_argument("--altitude-band", default=None, metavar="LO:HI",
+                    help="Keep only samples whose height ABOVE the detected seafloor is in [LO,HI] m "
+                         "(e.g. 20:200 for a near-bottom layer that tracks the terrain). Beams with no "
+                         "bottom detection are excluded. Composes with --depth-band (both must hold).")
     ap.add_argument("--max-depth-m", type=float, default=None, help="Drop samples deeper than this.")
     ap.add_argument("--projector", choices=["auto", "utm", "local"], default="auto",
                     help="Coordinate frame: auto (UTM if pyproj else local ENU), utm, or local.")
@@ -1291,7 +1342,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         args.output, mwc_files=args.mwc, nav_paths=args.nav, install_paths=args.install,
         auto_companion=not args.no_auto_companion, combine=args.combine,
         cell_m=args.cell_m, reduce=args.reduce,
-        depth_band=_parse_band(args.depth_band), projector=args.projector,
+        depth_band=_parse_band(args.depth_band),
+        altitude_band=_parse_band(args.altitude_band), projector=args.projector,
         max_depth_m=args.max_depth_m, on_uncovered=args.on_uncovered,
         apply_attitude=not args.no_attitude, stabilized_beams=not args.unstabilized_beams,
         limit=args.limit, write_geotiff=args.geotiff, write_asc=args.asc,

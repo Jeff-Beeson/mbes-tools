@@ -21,14 +21,20 @@ from mbes_tools.wc_diagnostics import WCFrame
 # ---------------------------------------------------------------------------
 
 
-def make_frame(amp_db, angles_deg, c=1500.0, fs=750.0):
-    """A synthetic WCFrame; c=1500, fs=750 -> 1 m one-way range per sample."""
+def make_frame(amp_db, angles_deg, c=1500.0, fs=750.0, detected_samples=None):
+    """A synthetic WCFrame; c=1500, fs=750 -> 1 m one-way range per sample.
+
+    ``detected_samples`` (per beam) sets the bottom-detect sample index; the
+    default (all zeros) means "no bottom detected" on every beam.
+    """
     amp = np.asarray(amp_db, dtype=float)
+    det = (np.zeros(amp.shape[0], dtype=int) if detected_samples is None
+           else np.asarray(detected_samples, dtype=int))
     return WCFrame(
         amp_db=amp,
         phase_deg=None,
         angles_deg=np.asarray(angles_deg, dtype=float),
-        detected_samples=np.zeros(amp.shape[0], dtype=int),
+        detected_samples=det,
         sound_speed_m_s=c,
         sample_freq_hz=fs,
         phase_flag=0,
@@ -672,3 +678,107 @@ def test_generate_writes_asc_alongside(tmp_path):
                        auto_companion=False, on_uncovered="clamp", write_asc=True)
     ascs = [p for p in made if p.suffix == ".asc"]
     assert ascs and ascs[0].exists() and ascs[0].stat().st_size > 0
+
+
+# ---------------------------------------------------------------------------
+# 6. Height-above-seafloor band (Slice 2).
+# ---------------------------------------------------------------------------
+
+
+def bottom_frame(angle_deg, samples_amp, det_sample):
+    """One-beam frame with a detected bottom at ``det_sample`` and finite samples.
+
+    ``samples_amp`` is a dict {sample_k: amp_db}. With c=1500/fs=750 a sample at
+    range-sample k sits at one-way range k m; the seafloor depth for angle a is
+    cos(a)*det_sample, so a sample's height above bottom is cos(a)*(det - k).
+    """
+    width = max(max(samples_amp), det_sample) + 1
+    grid = np.full((1, width), np.nan)
+    for k, v in samples_amp.items():
+        grid[0, k] = v
+    return make_frame(grid, [angle_deg], detected_samples=[det_sample])
+
+
+def test_georeference_computes_height_above_seafloor():
+    # Nadir beam, bottom at sample 50 -> Zb = 50 m. Samples at 30 and 45 ->
+    # HAB 20 and 5 m. (heading/attitude irrelevant to the scalar HAB.)
+    frame = bottom_frame(angle_deg=0.0, samples_amp={30: -20.0, 45: -25.0}, det_sample=50)
+    nav = const_nav(0.0, 0.0, 0.0)
+    gs = wg.georeference_frame(frame, 0.0, nav, projector="local")
+    hab = gs.height_above_seafloor_m
+    assert hab is not None and hab.shape == gs.depth_m.shape
+    # Samples come out in ascending sample order (30 then 45).
+    order = np.argsort(gs.depth_m)
+    assert hab[order][0] == pytest.approx(20.0)
+    assert hab[order][1] == pytest.approx(5.0)
+
+
+def test_georeference_hab_is_nan_when_no_bottom():
+    # det_sample 0 -> "no bottom": HAB must be NaN so altitude bands drop it.
+    frame = one_sample_frame(angle_deg=0.0, sample_k=10)  # detected_samples defaults to 0
+    nav = const_nav(0.0, 0.0, 0.0)
+    gs = wg.georeference_frame(frame, 0.0, nav, projector="local")
+    assert gs.height_above_seafloor_m is not None
+    assert np.isnan(gs.height_above_seafloor_m).all()
+
+
+def test_georeference_hab_uses_beam_angle_for_seafloor_depth():
+    # A 60-deg beam with bottom at sample 50: seafloor depth = cos(60)*50 = 25 m.
+    # A sample at range-sample 20 sits at depth cos(60)*20 = 10 m -> HAB 15 m.
+    frame = bottom_frame(angle_deg=60.0, samples_amp={20: -20.0}, det_sample=50)
+    nav = const_nav(0.0, 0.0, 0.0)
+    gs = wg.georeference_frame(frame, 0.0, nav, projector="local")
+    assert gs.depth_m[0] == pytest.approx(np.cos(np.radians(60.0)) * 20.0)
+    assert gs.height_above_seafloor_m[0] == pytest.approx(np.cos(np.radians(60.0)) * 30.0)
+
+
+def _hab_samples(depth, amp, hab, epsg=None):
+    """A GeoSamples carrying explicit height_above_seafloor_m (single cell (0,0))."""
+    gs = geo_samples([1.0] * len(depth), [1.0] * len(depth), depth, amp, epsg=epsg)
+    gs.height_above_seafloor_m = np.asarray(hab, float)
+    return gs
+
+
+def test_mosaic_altitude_band_filters_by_height_above_bottom():
+    m = wg.GeoMosaic(cell_m=10.0, reduce="max", altitude_band=(20.0, 200.0))
+    # Three returns to the same cell: in-band (HAB 100), below-band (HAB 5, brighter),
+    # and no-bottom (HAB NaN, brightest). Only the in-band one survives.
+    m.add(_hab_samples([300.0, 480.0, 480.0], [-30.0, -5.0, -1.0], [100.0, 5.0, np.nan]))
+    res = m.finalize()
+    assert res.amplitude_db[0, 0] == pytest.approx(-30.0)
+    assert res.altitude_band == (20.0, 200.0)
+
+
+def test_mosaic_altitude_and_depth_bands_compose():
+    # depth in [0,400] AND height-above-bottom in [50,150]. Only sample 0 passes both.
+    m = wg.GeoMosaic(cell_m=10.0, reduce="max",
+                     depth_band=(0.0, 400.0), altitude_band=(50.0, 150.0))
+    m.add(_hab_samples(
+        depth=[300.0, 500.0, 350.0],   # sample 1 fails depth band
+        amp=[-30.0, -1.0, -2.0],
+        hab=[100.0, 100.0, 10.0],      # sample 2 fails altitude band
+    ))
+    res = m.finalize()
+    assert res.amplitude_db[0, 0] == pytest.approx(-30.0)
+
+
+def test_mosaic_altitude_band_requires_hab_data():
+    # A GeoSamples with no HAB array but an altitude band set -> clear error.
+    m = wg.GeoMosaic(cell_m=10.0, altitude_band=(0.0, 100.0))
+    gs = geo_samples([1.0], [1.0], [100.0], [-20.0])  # height_above_seafloor_m is None
+    with pytest.raises(ValueError, match="height_above_seafloor_m"):
+        m.add(gs)
+
+
+def test_build_mosaic_altitude_band_clamp_grids_real_ping():
+    """The altitude band flows end-to-end through the builder on the real EM124
+    ping. A wide band keeps near-bottom returns; the mosaic still grids."""
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    res = wg.build_mosaic_from_kmall(
+        fx, projector="local", cell_m=25.0, auto_companion=False, on_uncovered="clamp",
+        altitude_band=(0.0, 500.0),
+    )
+    assert res.altitude_band == (0.0, 500.0)
+    assert res.n_pings == 1 and res.amplitude_db.ndim == 2

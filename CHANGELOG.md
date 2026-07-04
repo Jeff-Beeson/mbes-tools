@@ -4,6 +4,29 @@ All notable changes to `mbes-tools` are documented here. The project follows
 [semantic versioning](https://semver.org/) (currently 0.x — minor versions may
 add features; the public API is kept backward compatible where practical).
 
+## [0.14.0] - 2026-07-03
+
+### Added (water-column mosaic — height-above-seafloor band)
+- **`mbes-wc-mosaic --altitude-band LO:HI`** — keep only samples whose height
+  **above the detected seafloor** is in `[LO, HI]` metres, e.g.
+  `--altitude-band 20:200` for a near-bottom scattering layer that follows the
+  terrain rather than a flat depth slice. Complements the existing
+  `--depth-band` (absolute depth); the two **compose** (a sample must satisfy
+  both).
+- `georeference_frame` now computes per-sample **height above seafloor** from the
+  per-beam bottom detection already carried on the frame
+  (`WCFrame.detected_samples`): seafloor depth `Zb = cos(angle)·c·det/(2·fs)`,
+  height `= Zb − Z`. Beams with no bottom detection (`det == 0`, e.g. swath
+  edges) yield `NaN` and are excluded from any altitude product. Exposed as
+  `GeoSamples.height_above_seafloor_m`; `GeoMosaic`/`GeoMosaicResult` gain an
+  `altitude_band`.
+- **Verified end-to-end** on the committed EM124 `.kmwcd` (~2900 m abyssal):
+  `--altitude-band 0:300` keeps 262/395 near-bottom cells and `1000:3000` a
+  different 236/395 higher in the water column — each a valid seafloor-relative
+  subset. New unit tests cover the HAB geometry (nadir + oblique beams), the
+  no-bottom NaN exclusion, the mosaic filter, depth+altitude composition, and the
+  missing-HAB guard.
+
 ## [0.13.0] - 2026-07-03
 
 ### Added (water-column mosaic — georeferenced raster export)

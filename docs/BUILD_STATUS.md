@@ -25,10 +25,12 @@ selection, cursor lat/lon readout; v0.12.0). **D1 water-column products are
 functionally complete and merged to `main`** (PR #10). A follow-on **water-column
 products enhancement** track is now underway: **Slice 1 — georeferenced raster
 export** (`mbes-wc-mosaic --geotiff`/`--asc`, EPSG threaded through the mosaic,
-new `geo` extra) landed at **v0.13.0** (**237 passed / 4 skipped**), with
-height-above-seafloor bands, gridding speedups (vectorized map-reduce +
-multiprocessing + optional GPU), and TVG/angular normalization planned next
-(see `~/.claude/plans`). **D2** (native GSF reader) remains in the backlog below.
+new `geo` extra) landed at **v0.13.0**, and **Slice 2 — height-above-seafloor
+band** (`--altitude-band`, a seafloor-relative complement to `--depth-band`,
+computed from the per-beam bottom detection) at **v0.14.0** (**245 passed /
+3 skipped**). Still planned: gridding speedups (vectorized map-reduce +
+multiprocessing + optional GPU) and TVG/angular normalization (see
+`~/.claude/plans`). **D2** (native GSF reader) remains in the backlog below.
 
 > Read this together with `docs/UPGRADE_PLAN.md` (the spec),
 > `docs/VERIFICATION_DATA.md` (the real-data corpus + how to regenerate the
