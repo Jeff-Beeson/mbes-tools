@@ -901,3 +901,50 @@ def test_parallel_composite_matches_serial(reduce):
         np.nan_to_num(parallel.amplitude_db, nan=-999),
     )
     np.testing.assert_array_equal(serial.counts, parallel.counts)
+
+
+# ---------------------------------------------------------------------------
+# 8. Empirical normalization wired through the mosaic (Slice 4a).
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_none_is_default_and_identity():
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    kw = dict(projector="local", cell_m=25.0, auto_companion=False, on_uncovered="clamp")
+    default = wg.build_mosaic_from_kmall(fx, **kw)
+    explicit_none = wg.build_mosaic_from_kmall(fx, normalize="none", **kw)
+    np.testing.assert_array_equal(
+        np.nan_to_num(default.amplitude_db, nan=-999),
+        np.nan_to_num(explicit_none.amplitude_db, nan=-999),
+    )
+
+
+def test_normalize_empirical_keeps_footprint_changes_values():
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    kw = dict(projector="local", cell_m=25.0, auto_companion=False, on_uncovered="clamp")
+    raw = wg.build_mosaic_from_kmall(fx, **kw)
+    norm = wg.build_mosaic_from_kmall(fx, normalize="empirical", **kw)
+    # Normalization changes amplitudes but not the geometry / occupied cells.
+    assert np.array_equal(np.isfinite(raw.amplitude_db), np.isfinite(norm.amplitude_db))
+    assert not np.allclose(
+        np.nan_to_num(raw.amplitude_db), np.nan_to_num(norm.amplitude_db)
+    )
+
+
+def test_normalize_parallel_matches_serial():
+    """--normalize must survive the process-pool path bit-for-bit vs serial."""
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    kw = dict(projector="local", cell_m=25.0, auto_companion=False,
+              on_uncovered="clamp", normalize="empirical")
+    serial = wg.build_composite_mosaic([fx, fx], workers=1, **kw)
+    parallel = wg.build_composite_mosaic([fx, fx], workers=2, **kw)
+    np.testing.assert_array_equal(
+        np.nan_to_num(serial.amplitude_db, nan=-999),
+        np.nan_to_num(parallel.amplitude_db, nan=-999),
+    )

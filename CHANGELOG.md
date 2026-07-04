@@ -4,6 +4,36 @@ All notable changes to `mbes-tools` are documented here. The project follows
 [semantic versioning](https://semver.org/) (currently 0.x — minor versions may
 add features; the public API is kept backward compatible where practical).
 
+## [0.16.0] - 2026-07-03
+
+### Added (water-column — empirical normalization)
+- **`mbes_tools.water_column_normalize`** — remove **acquisition gain** from
+  water-column amplitude so real scattering structure (midwater layers, plumes)
+  is not swamped by the range- and angle-dependent instrument response. The
+  logged amplitude carries a strong per-range trend (applied TVG + absorption +
+  spreading) and a per-beam-angle trend (beam pattern / array shading); both are
+  removed **empirically** — no instrument model — by a two-way additive **median
+  polish** in the dB domain over the *open water* only (near-field and the
+  seafloor return excluded, reusing `water_column_water_mask`). The fitted trends
+  are removed from the whole grid and the water level is re-anchored to a common
+  reference, so the flat background reads the same across range, angle and ping.
+  `normalize_frame(frame, method="empirical")` returns a de-trended `WCFrame`;
+  `detrend_amplitude` exposes the fitted range/angle effects for review.
+- **`--normalize {none,empirical}`** on **`mbes-wc-mosaic`**, **`mbes-wc-grid`**
+  and **`mbes-wc-viewer`** — the frame is de-trended before gridding /
+  georeferencing / stacking, so every product can render de-biased responses. It
+  survives the mosaic's process-pool path **bit-for-bit vs serial**.
+- **This is a *relative* (de-biased dB) normalization, not calibrated `Sv`.**
+  Source level and beam solid angle are absent from `#MWC`/`k`, so absolute
+  volume-scattering calibration is impossible from these files alone; a
+  semi-physical relative-`Sv` path (recorded TVG law + a supplied absorption) is
+  a deliberate follow-up (see `docs/WATER_COLUMN_HANDOFF.md`).
+- **Verified:** synthetic frames with injected range + beam-angle gain are
+  flattened to < 0.05 dB residual spread (both trends removed) while a real
+  midwater target still stands > 20 dB above the background; on the real EM124
+  `.kmwcd` the mosaic keeps its footprint, shifts amplitudes, and tightens the
+  background spread. 15 new tests (module + mosaic wiring + parallel parity).
+
 ## [0.15.0] - 2026-07-03
 
 ### Changed (water-column mosaic — accumulator performance)

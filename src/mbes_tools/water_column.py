@@ -577,13 +577,20 @@ def generate(
     threshold_db: Optional[float] = None,
     min_range_m: float = 0.0,
     max_depth_m: Optional[float] = None,
+    normalize: Optional[str] = None,
 ) -> List[Path]:
     """Grid + anomaly panels for the first ping of each supplied file.
 
     ``.wcd`` files are reassembled by ``counter`` first, so the first ping is a
-    full swath. Returns the saved PNG paths; a failing panel is reported but does
-    not abort the rest. Prints the per-ping anomaly summary.
+    full swath. ``normalize="empirical"`` de-trends each ping's amplitude (per-range
+    + per-beam-angle acquisition gain) before gridding. Returns the saved PNG
+    paths; a failing panel is reported but does not abort the rest. Prints the
+    per-ping anomaly summary.
     """
+    # Lazy import avoids a circular import (water_column_normalize imports this).
+    from mbes_tools.water_column_normalize import frame_normalizer
+
+    normalizer = frame_normalizer(normalize)
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     made: List[Path] = []
@@ -598,6 +605,8 @@ def generate(
             print("FAIL", getattr(fn, "__name__", fn), "->", type(exc).__name__, str(exc)[:120])
 
     def handle(frame: WCFrame, stem: str):
+        if normalizer is not None:
+            frame = normalizer(frame)
         grid = grid_frame(frame, reduce=reduce, max_depth_m=max_depth_m)
         run(panel_grid, grid, out, stem)
         anom = detect_anomalies(frame, threshold_db=threshold_db, min_range_m=min_range_m)
@@ -650,6 +659,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                          "(on top of the sample-based near-field guard).")
     ap.add_argument("--max-depth-m", type=float, default=None,
                     help="Clip the gridded echogram below this depth.")
+    ap.add_argument("--normalize", choices=["none", "empirical"], default="none",
+                    help="Remove per-range + per-beam-angle acquisition gain (median polish over "
+                         "the open water) before gridding. Relative dB, not calibrated Sv.")
     args = ap.parse_args(argv)
     if not args.mwc and not args.wcd:
         ap.error("supply at least one --mwc or --wcd file")
@@ -657,6 +669,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         args.output, mwc_files=args.mwc, wcd_files=args.wcd,
         reduce=args.reduce, threshold_db=args.threshold_db,
         min_range_m=args.min_range_m, max_depth_m=args.max_depth_m,
+        normalize=args.normalize,
     )
     print(f"\nWrote {len(made)} panel(s) to {args.output}")
 
