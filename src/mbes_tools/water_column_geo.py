@@ -1026,6 +1026,8 @@ def _accumulate_into(
     apply_attitude: bool = True,
     stabilized_beams: bool = True,
     normalize: Optional[str] = None,
+    clean_water: bool = False,
+    msr_guard_m: float = 0.0,
 ) -> int:
     """Georeference one file's pings into ``mosaic``; return the skipped count.
 
@@ -1035,6 +1037,8 @@ def _accumulate_into(
     anchor — ``[None]`` until the first kept ping sets it — so a composite mosaic
     keeps one anchor (hence one CRS) across many files.
     """
+    from mbes_tools.water_column import apply_min_slant_range
+
     lo, hi = nav.time_span
     normalizer = frame_normalizer(normalize)
     n_uncovered = 0
@@ -1047,6 +1051,8 @@ def _accumulate_into(
             if on_uncovered == "skip":
                 continue
         frame = frame_fn(item)
+        if clean_water:
+            frame = apply_min_slant_range(frame, guard_m=msr_guard_m)
         if normalizer is not None:
             frame = normalizer(frame)
         if anchor_ref[0] is None:
@@ -1081,6 +1087,8 @@ def _accumulate_mosaic(
     stabilized_beams: bool = True,
     altitude_band: Optional[Tuple[float, float]] = None,
     normalize: Optional[str] = None,
+    clean_water: bool = False,
+    msr_guard_m: float = 0.0,
 ) -> GeoMosaicResult:
     """Single-file wrapper over :func:`_accumulate_into` (own mosaic + anchor)."""
     if on_uncovered not in ("skip", "clamp"):
@@ -1091,6 +1099,7 @@ def _accumulate_mosaic(
         projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
         coverage_tol_s=coverage_tol_s, limit=limit,
         apply_attitude=apply_attitude, stabilized_beams=stabilized_beams, normalize=normalize,
+        clean_water=clean_water, msr_guard_m=msr_guard_m,
     )
     if n_uncovered and on_uncovered == "skip":
         _warn_uncovered(path, kind, n_uncovered, nav)
@@ -1119,6 +1128,8 @@ def build_mosaic_from_kmall(
     stabilized_beams: bool = True,
     limit: Optional[int] = None,
     normalize: Optional[str] = None,
+    clean_water: bool = False,
+    msr_guard_m: float = 0.0,
 ) -> GeoMosaicResult:
     """Accumulate a mosaic from every ``#MWC`` ping of a `.kmall`/`.kmwcd` file.
 
@@ -1146,6 +1157,7 @@ def build_mosaic_from_kmall(
         path, iter_mwc_datagrams(path), _mwc_time, frame_from_mwc, nav, install,
         kind="#MWC", cell_m=cell_m, reduce=reduce, depth_band=depth_band,
         altitude_band=altitude_band, normalize=normalize,
+        clean_water=clean_water, msr_guard_m=msr_guard_m,
         projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
         coverage_tol_s=coverage_tol_s, limit=limit,
         apply_attitude=apply_attitude, stabilized_beams=stabilized_beams,
@@ -1173,6 +1185,8 @@ def build_mosaic_from_wcd(
     limit: Optional[int] = None,
     allow_incomplete: bool = False,
     normalize: Optional[str] = None,
+    clean_water: bool = False,
+    msr_guard_m: float = 0.0,
 ) -> GeoMosaicResult:
     """Accumulate a mosaic from a `.wcd`/`.all` ``k`` Water Column file.
 
@@ -1198,6 +1212,7 @@ def build_mosaic_from_wcd(
         path, pings, lambda p: _all_header_time(p.header), frame_from_wcd, nav, install,
         kind="k", cell_m=cell_m, reduce=reduce, depth_band=depth_band,
         altitude_band=altitude_band, normalize=normalize,
+        clean_water=clean_water, msr_guard_m=msr_guard_m,
         projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
         coverage_tol_s=coverage_tol_s, limit=limit,
         apply_attitude=apply_attitude, stabilized_beams=stabilized_beams,
@@ -1284,6 +1299,10 @@ def _mosaic_worker(args):
     lo, hi = nav.time_span
     reduce = cfg["reduce"]
     normalizer = frame_normalizer(cfg.get("normalize"))
+    clean_water = cfg.get("clean_water", False)
+    msr_guard_m = cfg.get("msr_guard_m", 0.0)
+    if clean_water:
+        from mbes_tools.water_column import apply_min_slant_range
     ies: List[np.ndarray] = []
     jns: List[np.ndarray] = []
     vals: List[np.ndarray] = []
@@ -1301,6 +1320,8 @@ def _mosaic_worker(args):
             if cfg["on_uncovered"] == "skip":
                 continue
         frame = frame_fn(item)
+        if clean_water:
+            frame = apply_min_slant_range(frame, guard_m=msr_guard_m)
         if normalizer is not None:
             frame = normalizer(frame)
         gs = georeference_frame(
@@ -1351,6 +1372,8 @@ def build_composite_mosaic(
     allow_incomplete: bool = False,
     workers: int = 1,
     normalize: Optional[str] = None,
+    clean_water: bool = False,
+    msr_guard_m: float = 0.0,
     verbose: bool = False,
 ) -> GeoMosaicResult:
     """Accumulate **many** water-column files into one shared plan-view mosaic.
@@ -1381,7 +1404,8 @@ def build_composite_mosaic(
             auto_companion=auto_companion, projector=projector, max_depth_m=max_depth_m,
             on_uncovered=on_uncovered, coverage_tol_s=coverage_tol_s,
             apply_attitude=apply_attitude, stabilized_beams=stabilized_beams,
-            limit=limit, allow_incomplete=allow_incomplete, normalize=normalize, verbose=verbose,
+            limit=limit, allow_incomplete=allow_incomplete, normalize=normalize,
+            clean_water=clean_water, msr_guard_m=msr_guard_m, verbose=verbose,
         )
 
     anchor_ref: List[Optional[Tuple[float, float]]] = [None]
@@ -1402,6 +1426,7 @@ def build_composite_mosaic(
             projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
             coverage_tol_s=coverage_tol_s, limit=limit,
             apply_attitude=apply_attitude, stabilized_beams=stabilized_beams, normalize=normalize,
+            clean_water=clean_water, msr_guard_m=msr_guard_m,
         )
         total_uncovered += n_unc
         if verbose:
@@ -1417,7 +1442,7 @@ def build_composite_mosaic(
 def _build_composite_parallel(
     paths, mosaic, *, workers, nav_paths, install_paths, auto_companion, projector,
     max_depth_m, on_uncovered, coverage_tol_s, apply_attitude, stabilized_beams,
-    limit, allow_incomplete, normalize, verbose,
+    limit, allow_incomplete, normalize, clean_water, msr_guard_m, verbose,
 ) -> GeoMosaicResult:
     """Process-pool file-parallel composite; merges partials in file order."""
     import warnings
@@ -1431,7 +1456,7 @@ def _build_composite_parallel(
         projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
         coverage_tol_s=coverage_tol_s, apply_attitude=apply_attitude,
         stabilized_beams=stabilized_beams, limit=limit, allow_incomplete=allow_incomplete,
-        normalize=normalize,
+        normalize=normalize, clean_water=clean_water, msr_guard_m=msr_guard_m,
     )
     anchor = _first_kept_anchor(paths, cfg)
     if anchor is None:  # no nav-resolvable file with a decodable ping
@@ -1490,6 +1515,8 @@ def generate(
     write_asc: bool = False,
     workers: int = 1,
     normalize: Optional[str] = None,
+    clean_water: bool = False,
+    msr_guard_m: float = 0.0,
 ) -> List[Path]:
     """Build + render mosaic panel(s) from water-column files. Returns output paths.
 
@@ -1511,7 +1538,7 @@ def generate(
             projector=projector, max_depth_m=max_depth_m,
             on_uncovered=on_uncovered, apply_attitude=apply_attitude,
             stabilized_beams=stabilized_beams, limit=limit, workers=workers,
-            normalize=normalize, verbose=True,
+            normalize=normalize, clean_water=clean_water, msr_guard_m=msr_guard_m, verbose=True,
         )
         uncov = f", {result.n_uncovered} uncovered-skipped" if result.n_uncovered else ""
         print(f"OK   composite: {result.n_pings} pings, grid {result.amplitude_db.shape}, "
@@ -1541,6 +1568,7 @@ def generate(
                 projector=projector, max_depth_m=max_depth_m,
                 on_uncovered=on_uncovered, apply_attitude=apply_attitude,
                 stabilized_beams=stabilized_beams, limit=limit, normalize=normalize,
+                clean_water=clean_water, msr_guard_m=msr_guard_m,
             )
         except Exception as exc:  # noqa: BLE001
             print("FAIL", f, "->", type(exc).__name__, str(exc)[:160])
@@ -1619,6 +1647,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                          "ping's amplitude over the open water (per-range TVG/absorption + "
                          "per-beam-angle beam-pattern, via median polish), so real midwater/plume "
                          "structure stands out. Relative dB, not calibrated Sv. Default none.")
+    ap.add_argument("--clean-water", action="store_true",
+                    help="Keep only the bottom-sidelobe-free water column: drop samples at/beyond "
+                         "each ping's minimum bottom-detect slant range (the nadir range), where "
+                         "the seafloor sidelobe contaminates every beam. Composes with "
+                         "--depth-band/--altitude-band (all must hold).")
+    ap.add_argument("--msr-guard-m", type=float, default=0.0, metavar="M",
+                    help="With --clean-water, pull the minimum-slant-range cutoff inward by M "
+                         "metres to stay clear of the sidelobe onset (default 0 = exact nadir range).")
     ap.add_argument("--geotiff", action="store_true",
                     help="Also write a georeferenced GeoTIFF (needs --projector utm + rasterio; "
                          "pip install 'mbes-tools[geo]').")
@@ -1637,6 +1673,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         apply_attitude=not args.no_attitude, stabilized_beams=not args.unstabilized_beams,
         limit=args.limit, write_geotiff=args.geotiff, write_asc=args.asc,
         workers=args.workers, normalize=args.normalize,
+        clean_water=args.clean_water, msr_guard_m=args.msr_guard_m,
     )
     print(f"\nWrote {len(made)} mosaic output(s) to {args.output}")
 

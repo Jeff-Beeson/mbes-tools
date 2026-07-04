@@ -948,3 +948,41 @@ def test_normalize_parallel_matches_serial():
         np.nan_to_num(serial.amplitude_db, nan=-999),
         np.nan_to_num(parallel.amplitude_db, nan=-999),
     )
+
+
+# ---------------------------------------------------------------------------
+# 9. Minimum-slant-range (--clean-water) filter wired through the mosaic.
+# ---------------------------------------------------------------------------
+
+
+def test_clean_water_drops_beyond_nadir_samples():
+    """--clean-water must remove the below-nadir-range returns, so the mosaic keeps
+    strictly fewer cells than the unfiltered build (the seafloor + sidelobe zone
+    is what gets cut)."""
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    kw = dict(projector="local", cell_m=25.0, auto_companion=False, on_uncovered="clamp")
+    full = wg.build_mosaic_from_kmall(fx, **kw)
+    clean = wg.build_mosaic_from_kmall(fx, clean_water=True, **kw)
+    n_full = int(np.isfinite(full.amplitude_db).sum())
+    n_clean = int(np.isfinite(clean.amplitude_db).sum())
+    assert 0 < n_clean < n_full  # some clean water remains, but the deep zone is gone
+    # A guard pulls the cutoff further in -> no more cells than the unguarded clean cut.
+    guarded = wg.build_mosaic_from_kmall(fx, clean_water=True, msr_guard_m=200.0, **kw)
+    assert int(np.isfinite(guarded.amplitude_db).sum()) <= n_clean
+
+
+def test_clean_water_parallel_matches_serial():
+    """--clean-water must survive the process-pool path bit-for-bit vs serial."""
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    kw = dict(projector="local", cell_m=25.0, auto_companion=False,
+              on_uncovered="clamp", clean_water=True)
+    serial = wg.build_composite_mosaic([fx, fx], workers=1, **kw)
+    parallel = wg.build_composite_mosaic([fx, fx], workers=2, **kw)
+    np.testing.assert_array_equal(
+        np.nan_to_num(serial.amplitude_db, nan=-999),
+        np.nan_to_num(parallel.amplitude_db, nan=-999),
+    )

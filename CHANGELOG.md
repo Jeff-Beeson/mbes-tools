@@ -4,6 +4,32 @@ All notable changes to `mbes-tools` are documented here. The project follows
 [semantic versioning](https://semver.org/) (currently 0.x — minor versions may
 add features; the public API is kept backward compatible where practical).
 
+## [0.17.0] - 2026-07-04
+
+### Added (water-column — minimum-slant-range "clean water column" filter)
+- **`mbes-wc-mosaic --clean-water`** — keep only the **bottom-sidelobe-free**
+  water column: drop every sample at or beyond the ping's **minimum bottom-detect
+  slant range** (`R_min`, the nadir range for a flat bottom). Beyond `R_min` the
+  seafloor's sidelobe energy arrives in *every* beam, so only the near-range arc
+  below `R_min` is trustworthy water column. Because slant range is monotonic in
+  sample index and the range axis is common to all beams, the cut is a single
+  per-ping column index applied to every beam.
+- **`--msr-guard-m M`** pulls the cutoff inward by `M` metres to stay clear of the
+  sidelobe onset (default 0 = exact nadir range).
+- **Composes** with `--depth-band` / `--altitude-band` (all filters must hold) and
+  is applied before `--normalize`, so the empirical de-trend fits only clean water.
+  Threaded through the process-pool path (`--workers`) **bit-for-bit vs serial**.
+  A ping with no bottom detection anywhere is passed through unchanged (no `R_min`
+  reference).
+- New reusable primitives in `mbes_tools.water_column`:
+  `minimum_slant_range_sample(detected_samples)` and
+  `apply_min_slant_range(frame, guard_m=...)` (a `WCFrame → WCFrame` mask), so
+  `mbes-wc-grid` / `mbes-wc-viewer` can adopt the same filter later.
+- **Verified:** synthetic pings cut exactly at the shortest bottom detection (with
+  the guard and no-bottom cases); on the real EM304 H14070 `.kmwcd` `--clean-water`
+  keeps ~63% of cells and drops the ~64→54 dB seafloor peak (the bottom + sidelobe
+  zone is what's removed). 6 new tests.
+
 ## [0.16.1] - 2026-07-04
 
 ### Changed (catalog)

@@ -355,6 +355,43 @@ def water_column_water_mask(
     return mask
 
 
+def minimum_slant_range_sample(detected_samples: np.ndarray) -> Optional[int]:
+    """Sample index of the ping's **shortest** bottom detection (``R_min``).
+
+    Across a ping the seafloor is detected at different slant ranges; the shortest
+    (the nadir range, for a flat bottom) is where the bottom's sidelobe energy
+    arrives in *every* beam. Returns that sample index, or ``None`` when no beam
+    detected a bottom (no reference to define the clean zone).
+    """
+    valid = detected_samples[detected_samples > 0]
+    return int(valid.min()) if valid.size else None
+
+
+def apply_min_slant_range(frame: WCFrame, *, guard_m: float = 0.0) -> WCFrame:
+    """Return a copy of ``frame`` keeping only the bottom-sidelobe-free water column.
+
+    Samples at or beyond the ping's minimum bottom-detect slant range ``R_min``
+    (:func:`minimum_slant_range_sample`) are set to ``NaN`` — this is the standard
+    **minimum-slant-range** ("clean water column") filter: beyond ``R_min`` every
+    beam may carry the nadir seafloor's sidelobe, so only the near-range arc below
+    ``R_min`` is trustworthy. Because slant range is monotonic in sample index and
+    the range axis is common to all beams, the cut is a single column index applied
+    to every beam. ``guard_m`` pulls the cutoff inward by that many metres (via the
+    per-ping range resolution) to stay clear of the sidelobe onset. A ping with no
+    bottom detection anywhere is returned unchanged (no ``R_min`` reference).
+    """
+    cutoff = minimum_slant_range_sample(frame.detected_samples)
+    if cutoff is None:
+        return frame
+    if guard_m:
+        c, fs = frame.sound_speed_m_s, frame.sample_freq_hz
+        cutoff -= max(0, int(round(2.0 * fs * guard_m / c)))
+    cutoff = max(cutoff, 0)
+    amp = frame.amp_db.copy()
+    amp[:, cutoff:] = np.nan
+    return dataclasses.replace(frame, amp_db=amp)
+
+
 def detect_anomalies(
     frame: WCFrame,
     *,
