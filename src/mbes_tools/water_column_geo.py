@@ -50,7 +50,7 @@ import importlib.util
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -500,19 +500,86 @@ class GeoMosaicResult:
         return 0.5 * (self.north_edges[:-1] + self.north_edges[1:])
 
 
+def _ping_cell_partials(
+    gs: GeoSamples,
+    cell_m: float,
+    reduce: str,
+    depth_band: Optional[Tuple[float, float]],
+    altitude_band: Optional[Tuple[float, float]],
+):
+    """Reduce one ping's samples to its unique cells (the per-ping map step).
+
+    Returns ``(ie, jn, val, cnt)`` where ``ie/jn`` are int64 cell indices and,
+    per unique cell: for ``max`` ``val`` is the peak dB and ``cnt`` is ``None``;
+    for ``mean`` ``val`` is the summed linear intensity and ``cnt`` the sample
+    count. Empty arrays when no sample passes the band filters. This is the shared
+    kernel behind :meth:`GeoMosaic.add` and the multiprocessing worker, so serial
+    and parallel builds produce identical per-ping partials.
+    """
+    e, n, d, a = gs.easting_m, gs.northing_m, gs.depth_m, gs.amplitude_db
+    keep = None
+    if depth_band is not None:
+        lo, hi = depth_band
+        keep = (d >= lo) & (d <= hi)
+    if altitude_band is not None:
+        hab = gs.height_above_seafloor_m
+        if hab is None:
+            raise ValueError(
+                "altitude_band requires GeoSamples.height_above_seafloor_m "
+                "(produced by georeference_frame); got None"
+            )
+        lo, hi = altitude_band
+        # NaN (no bottom detected) fails the comparison, so those samples drop.
+        akeep = np.isfinite(hab) & (hab >= lo) & (hab <= hi)
+        keep = akeep if keep is None else (keep & akeep)
+    if keep is not None:
+        e, n, a = e[keep], n[keep], a[keep]
+
+    empty = np.empty(0, dtype=np.int64)
+    if e.size == 0:
+        return empty, empty, np.empty(0), (None if reduce == "max" else empty)
+
+    ie = np.floor(e / cell_m).astype(np.int64)
+    jn = np.floor(n / cell_m).astype(np.int64)
+    # Encode the cell as a single int64 key so the per-ping reduce uses a 1-D
+    # unique + C-level bincount / reduceat instead of a 2-D lexsort (much faster).
+    ie_min = int(ie.min()); jn_min = int(jn.min())
+    stride = int(jn.max()) - jn_min + 1
+    key = (ie - ie_min) * stride + (jn - jn_min)
+
+    if reduce == "max":
+        order = np.argsort(key, kind="stable")
+        skey = key[order]
+        uniq_key, first = np.unique(skey, return_index=True)
+        best = np.maximum.reduceat(a[order], first)
+        return uniq_key // stride + ie_min, uniq_key % stride + jn_min, best, None
+    lin = np.power(10.0, a / 10.0)
+    uniq_key, inv = np.unique(key, return_inverse=True)
+    inv = inv.ravel()
+    sums = np.bincount(inv, weights=lin, minlength=uniq_key.size)
+    counts = np.bincount(inv, minlength=uniq_key.size).astype(np.int64)
+    return uniq_key // stride + ie_min, uniq_key % stride + jn_min, sums, counts
+
+
 class GeoMosaic:
     """Accumulate geo-referenced samples into a fixed-cell plan-view grid.
 
-    Streaming and memory-proportional-to-occupied-cells: samples are reduced
-    into a sparse ``{(iE, iN): value}`` dict as they arrive, then rasterized to a
-    dense grid by :meth:`finalize`. ``reduce="max"`` is peak-hold (good for thin
-    plume/target returns); ``reduce="mean"`` averages in the linear-intensity
-    domain. ``depth_band`` keeps only samples with ``lo <= depth <= hi`` (absolute
-    depth) — set a midwater band to map plumes without the seafloor swamping the
-    peak-hold. ``altitude_band`` instead keeps samples by height **above the
-    detected seafloor** (``lo <= Zb − Z <= hi``), which follows the terrain rather
-    than a flat depth slice; samples on beams with no bottom detection are dropped.
-    The two bands compose (a sample must satisfy both).
+    Streaming and memory-proportional-to-occupied-cells. Each ping is reduced to
+    its unique cells with numpy (:func:`_ping_cell_partials`) and **buffered** as
+    sparse ``(iE, iN, value[, count])`` rows in arrival order; a single global
+    vectorized reduce (:meth:`finalize`) collapses the buffer to the dense grid.
+    Buffers are compacted once they exceed ``compact_rows`` so memory stays
+    proportional to occupied cells, not to the ping count. There is **no
+    per-ping Python loop** (the old dict-merge) and **no per-cell Python loop** in
+    finalize — both were the accumulation hot spots.
+
+    ``reduce="max"`` is peak-hold (good for thin plume/target returns);
+    ``reduce="mean"`` averages in the linear-intensity domain — accumulated
+    strictly in arrival order (buffering + compaction preserve it) so the result
+    is bit-for-bit independent of chunking. ``depth_band`` keeps only samples with
+    ``lo <= depth <= hi`` (absolute depth); ``altitude_band`` keeps samples by
+    height **above the detected seafloor** (``lo <= Zb − Z <= hi``), which follows
+    the terrain; beams with no bottom detection are dropped. The two bands compose.
     """
 
     def __init__(
@@ -522,6 +589,7 @@ class GeoMosaic:
         reduce: str = "max",
         depth_band: Optional[Tuple[float, float]] = None,
         altitude_band: Optional[Tuple[float, float]] = None,
+        compact_rows: int = 4_000_000,
     ):
         if reduce not in ("max", "mean"):
             raise ValueError(f"reduce must be 'max' or 'mean', got {reduce!r}")
@@ -531,71 +599,101 @@ class GeoMosaic:
         self.reduce = reduce
         self.depth_band = depth_band
         self.altitude_band = altitude_band
+        self.compact_rows = int(compact_rows)
         self.crs_label: Optional[str] = None
         self.epsg: Optional[int] = None
         self.n_pings = 0
-        # For max: cell -> best dB. For mean: cell -> [sum_linear, count].
-        self._cells: Dict[Tuple[int, int], object] = {}
+        # Buffered per-ping unique-cell partials, in arrival order.
+        self._ie: List[np.ndarray] = []
+        self._jn: List[np.ndarray] = []
+        self._val: List[np.ndarray] = []           # max: peak dB; mean: sum linear
+        self._cnt: List[np.ndarray] = []           # mean only: sample counts
+        self._buffered = 0                          # rows currently buffered
+
+    def _append(self, ie, jn, val, cnt) -> None:
+        if ie.size == 0:
+            return
+        self._ie.append(ie)
+        self._jn.append(jn)
+        self._val.append(val)
+        if self.reduce == "mean":
+            self._cnt.append(cnt)
+        self._buffered += int(ie.size)
+        if self._buffered > self.compact_rows:
+            self._compact()
+
+    def _reduce_rows(self, ie, jn, val, cnt):
+        """Global reduce of concatenated rows to one entry per unique cell.
+
+        Cells are encoded as a single int64 key (a 1-D ``unique`` is far cheaper
+        than a 2-D ``unique``/lexsort), then reduced with C-level primitives:
+        ``bincount`` for the mean sum/count and a sort + ``maximum.reduceat`` for
+        the peak. The mean accumulates in the given row order — so callers that
+        preserve arrival order get an order-stable (bit-identical) result.
+        """
+        ie_min = int(ie.min()); jn_min = int(jn.min())
+        stride = int(jn.max()) - jn_min + 1                 # rows per column
+        key = (ie - ie_min).astype(np.int64) * stride + (jn - jn_min)
+
+        if self.reduce == "max":
+            order = np.argsort(key, kind="stable")
+            skey = key[order]
+            uniq_key, first = np.unique(skey, return_index=True)
+            gmax = np.maximum.reduceat(val[order], first)
+            rie = uniq_key // stride + ie_min
+            rjn = uniq_key % stride + jn_min
+            return rie, rjn, gmax, None
+
+        uniq_key, inv = np.unique(key, return_inverse=True)
+        inv = inv.ravel()
+        s = np.bincount(inv, weights=val, minlength=uniq_key.size)
+        c = np.bincount(inv, weights=cnt, minlength=uniq_key.size).astype(np.int64)
+        rie = uniq_key // stride + ie_min
+        rjn = uniq_key % stride + jn_min
+        return rie, rjn, s, c
+
+    def _compact(self) -> None:
+        """Collapse the buffer to one row per cell (order-preserving)."""
+        if not self._ie:
+            return
+        ie = np.concatenate(self._ie)
+        jn = np.concatenate(self._jn)
+        val = np.concatenate(self._val)
+        cnt = np.concatenate(self._cnt) if self.reduce == "mean" else None
+        rie, rjn, rval, rcnt = self._reduce_rows(ie, jn, val, cnt)
+        self._ie, self._jn, self._val = [rie], [rjn], [rval]
+        self._cnt = [rcnt] if self.reduce == "mean" else []
+        self._buffered = int(rie.size)
 
     def add(self, gs: GeoSamples) -> int:
-        """Add one ping's :class:`GeoSamples`; return the number of cells touched.
-
-        The ping's samples are reduced to their unique cells with numpy first
-        (many samples share a cell), then those far fewer cells are merged into
-        the running global store — so the per-sample cost stays vectorized.
-        """
+        """Add one ping's :class:`GeoSamples`; return the cells this ping touched."""
         self.n_pings += 1
         if self.crs_label is None:
             self.crs_label = gs.crs_label
             self.epsg = gs.epsg
+        ie, jn, val, cnt = _ping_cell_partials(
+            gs, self.cell_m, self.reduce, self.depth_band, self.altitude_band
+        )
+        self._append(ie, jn, val, cnt)
+        return int(ie.size)
 
-        e, n, d, a = gs.easting_m, gs.northing_m, gs.depth_m, gs.amplitude_db
-        keep = None
-        if self.depth_band is not None:
-            lo, hi = self.depth_band
-            keep = (d >= lo) & (d <= hi)
-        if self.altitude_band is not None:
-            hab = gs.height_above_seafloor_m
-            if hab is None:
-                raise ValueError(
-                    "altitude_band requires GeoSamples.height_above_seafloor_m "
-                    "(produced by georeference_frame); got None"
-                )
-            lo, hi = self.altitude_band
-            # NaN (no bottom detected) fails the comparison, so those samples drop.
-            akeep = np.isfinite(hab) & (hab >= lo) & (hab <= hi)
-            keep = akeep if keep is None else (keep & akeep)
-        if keep is not None:
-            e, n, a = e[keep], n[keep], a[keep]
-        if e.size == 0:
-            return len(self._cells)
+    def add_partial(
+        self, ie, jn, val, cnt=None, *, n_pings: int = 0,
+        crs_label: Optional[str] = None, epsg: Optional[int] = None,
+    ) -> None:
+        """Append pre-reduced per-ping rows (e.g. from a worker) in arrival order.
 
-        ie = np.floor(e / self.cell_m).astype(np.int64)
-        jn = np.floor(n / self.cell_m).astype(np.int64)
-        uniq, inv = np.unique(np.column_stack([ie, jn]), axis=0, return_inverse=True)
-        inv = inv.ravel()
-        cells = self._cells
-
-        if self.reduce == "max":
-            best = np.full(uniq.shape[0], -np.inf)
-            np.maximum.at(best, inv, a)
-            for (k_e, k_n), val in zip(map(tuple, uniq.tolist()), best.tolist()):
-                cur = cells.get((k_e, k_n))
-                if cur is None or val > cur:
-                    cells[(k_e, k_n)] = val
-        else:
-            lin = np.power(10.0, a / 10.0)
-            sums = np.zeros(uniq.shape[0])
-            np.add.at(sums, inv, lin)
-            counts = np.bincount(inv, minlength=uniq.shape[0])
-            for (k_e, k_n), s, ct in zip(map(tuple, uniq.tolist()), sums.tolist(), counts.tolist()):
-                cur = cells.get((k_e, k_n))
-                if cur is None:
-                    cells[(k_e, k_n)] = [s, ct]
-                else:
-                    cur[0] += s
-                    cur[1] += ct
-        return len(cells)
+        The rows must be the unchanged per-ping partials in ping order (not
+        cross-ping reduced), so the global reduce stays order-stable and the
+        parallel build matches the serial one bit-for-bit.
+        """
+        if self.crs_label is None and crs_label is not None:
+            self.crs_label = crs_label
+            self.epsg = epsg
+        self.n_pings += int(n_pings)
+        self._append(np.asarray(ie, np.int64), np.asarray(jn, np.int64),
+                     np.asarray(val, float),
+                     None if cnt is None else np.asarray(cnt, np.int64))
 
     def add_frame(self, frame: WCFrame, ping_time: float, nav: NavTrack, **georef_kw) -> int:
         """Georeference a frame (:func:`georeference_frame`) and add it."""
@@ -604,7 +702,7 @@ class GeoMosaic:
 
     def finalize(self) -> GeoMosaicResult:
         """Rasterize the accumulated cells to a dense :class:`GeoMosaicResult`."""
-        if not self._cells:
+        if not self._ie:
             return GeoMosaicResult(
                 amplitude_db=np.full((1, 1), np.nan),
                 counts=np.zeros((1, 1), int),
@@ -619,31 +717,33 @@ class GeoMosaic:
                 altitude_band=self.altitude_band,
             )
 
-        ies = np.fromiter((k[0] for k in self._cells), dtype=np.int64)
-        jns = np.fromiter((k[1] for k in self._cells), dtype=np.int64)
-        ie_min, ie_max = int(ies.min()), int(ies.max())
-        jn_min, jn_max = int(jns.min()), int(jns.max())
+        ie = np.concatenate(self._ie)
+        jn = np.concatenate(self._jn)
+        val = np.concatenate(self._val)
+        cnt = np.concatenate(self._cnt) if self.reduce == "mean" else None
+        cie, cjn, cval, ccnt = self._reduce_rows(ie, jn, val, cnt)
+
+        ie_min, ie_max = int(cie.min()), int(cie.max())
+        jn_min, jn_max = int(cjn.min()), int(cjn.max())
         n_east = ie_max - ie_min + 1
         n_north = jn_max - jn_min + 1
 
         amp = np.full((n_north, n_east), np.nan)
-        cnt = np.zeros((n_north, n_east), int)
-        for (k_e, k_n), v in self._cells.items():
-            col = k_e - ie_min
-            row = k_n - jn_min
-            if self.reduce == "max":
-                amp[row, col] = v
-                cnt[row, col] = 1
-            else:
-                s, c = v
-                amp[row, col] = 10.0 * math.log10(s / c)
-                cnt[row, col] = c
+        cnt_grid = np.zeros((n_north, n_east), int)
+        rows = cjn - jn_min
+        cols = cie - ie_min
+        if self.reduce == "max":
+            amp[rows, cols] = cval
+            cnt_grid[rows, cols] = 1
+        else:
+            amp[rows, cols] = 10.0 * np.log10(cval / ccnt)
+            cnt_grid[rows, cols] = ccnt
 
         east_edges = (ie_min + np.arange(n_east + 1)) * self.cell_m
         north_edges = (jn_min + np.arange(n_north + 1)) * self.cell_m
         return GeoMosaicResult(
             amplitude_db=amp,
-            counts=cnt,
+            counts=cnt_grid,
             east_edges=east_edges,
             north_edges=north_edges,
             cell_m=self.cell_m,
@@ -1126,6 +1226,100 @@ def _file_ping_source(path: Path, *, allow_incomplete: bool = False):
     raise ValueError(f"cannot read water-column pings from {ext!r} files")
 
 
+def _first_kept_anchor(paths, cfg) -> Optional[Tuple[float, float]]:
+    """The ``(lon, lat)`` of the first ping any file would decode, in file order.
+
+    Mirrors :func:`_accumulate_into`'s lazy anchor: the first covered ping (or,
+    under ``on_uncovered="clamp"``, the first ping) of the first nav-resolvable
+    file. Fixing it up front lets every parallel worker share one grid/CRS and
+    match the serial build bit-for-bit.
+    """
+    for p in paths:
+        p = Path(p)
+        try:
+            nav, _ = _resolve_nav_and_install(
+                p, None, cfg["nav_paths"], None, cfg["install_paths"], cfg["auto_companion"]
+            )
+        except ValueError:
+            continue
+        _, items, time_fn, _ = _file_ping_source(p, allow_incomplete=cfg["allow_incomplete"])
+        lo, hi = nav.time_span
+        for i, item in enumerate(items):
+            if cfg["limit"] is not None and i >= cfg["limit"]:
+                break
+            t = time_fn(item)
+            covered = lo - cfg["coverage_tol_s"] <= t <= hi + cfg["coverage_tol_s"]
+            if not covered and cfg["on_uncovered"] == "skip":
+                continue
+            lat0, lon0 = (float(v) for v in nav.position_at(t))
+            return (lon0, lat0)
+    return None
+
+
+def _mosaic_worker(args):
+    """Process one file into its per-ping unique-cell rows (picklable, top-level).
+
+    Uses the shared ``cfg['anchor']`` so cell indices align across workers, and
+    returns the per-ping partials **concatenated in ping order, not reduced across
+    pings** — the main process does the single global reduce, so parallel and
+    serial builds are bit-identical (see :meth:`GeoMosaic.add_partial`).
+    """
+    path, cfg = args
+    path = Path(path)
+    try:
+        nav, install = _resolve_nav_and_install(
+            path, None, cfg["nav_paths"], None, cfg["install_paths"], cfg["auto_companion"]
+        )
+    except ValueError:
+        return None  # no navigation -> file skipped (not fatal)
+    kind, items, time_fn, frame_fn = _file_ping_source(path, allow_incomplete=cfg["allow_incomplete"])
+    lo, hi = nav.time_span
+    reduce = cfg["reduce"]
+    ies: List[np.ndarray] = []
+    jns: List[np.ndarray] = []
+    vals: List[np.ndarray] = []
+    cnts: List[np.ndarray] = []
+    n_unc = 0
+    n_pings = 0
+    crs_label = None
+    epsg = None
+    for i, item in enumerate(items):
+        if cfg["limit"] is not None and i >= cfg["limit"]:
+            break
+        t = time_fn(item)
+        if not (lo - cfg["coverage_tol_s"] <= t <= hi + cfg["coverage_tol_s"]):
+            n_unc += 1
+            if cfg["on_uncovered"] == "skip":
+                continue
+        frame = frame_fn(item)
+        gs = georeference_frame(
+            frame, t, nav, anchor_lonlat=cfg["anchor"], install=install,
+            projector=cfg["projector"], max_depth_m=cfg["max_depth_m"],
+            apply_attitude=cfg["apply_attitude"], stabilized_beams=cfg["stabilized_beams"],
+        )
+        if crs_label is None:
+            crs_label, epsg = gs.crs_label, gs.epsg
+        ie, jn, val, cnt = _ping_cell_partials(
+            gs, cfg["cell_m"], reduce, cfg["depth_band"], cfg["altitude_band"]
+        )
+        n_pings += 1
+        if ie.size:
+            ies.append(ie); jns.append(jn); vals.append(val)
+            if reduce == "mean":
+                cnts.append(cnt)
+    if ies:
+        ie = np.concatenate(ies); jn = np.concatenate(jns); val = np.concatenate(vals)
+        cnt = np.concatenate(cnts) if reduce == "mean" else None
+    else:
+        ie = np.empty(0, np.int64); jn = np.empty(0, np.int64); val = np.empty(0)
+        cnt = np.empty(0, np.int64) if reduce == "mean" else None
+    return {
+        "ie": ie, "jn": jn, "val": val, "cnt": cnt, "n_unc": n_unc, "n_pings": n_pings,
+        "crs_label": crs_label, "epsg": epsg, "kind": kind,
+        "nav_span": nav.time_span, "nav_source": nav.position_source,
+    }
+
+
 def build_composite_mosaic(
     paths: Sequence[Path],
     *,
@@ -1144,6 +1338,7 @@ def build_composite_mosaic(
     stabilized_beams: bool = True,
     limit: Optional[int] = None,
     allow_incomplete: bool = False,
+    workers: int = 1,
     verbose: bool = False,
 ) -> GeoMosaicResult:
     """Accumulate **many** water-column files into one shared plan-view mosaic.
@@ -1154,12 +1349,29 @@ def build_composite_mosaic(
     Files may mix ``.kmwcd``/``.kmall`` and ``.wcd``/``.all`` (each resolves its
     own companion nav). A file with no resolvable nav is skipped, not fatal.
 
+    ``workers`` > 1 georeferences the files across a process pool (one file per
+    task): the shared anchor is fixed up front (:func:`_first_kept_anchor`) and
+    each worker returns its per-ping partials, merged **in file order** — so the
+    result is bit-for-bit identical to the serial (``workers=1``) build for both
+    ``max`` and ``mean``. The default ``workers=1`` keeps the original streaming
+    path (and its per-file uncovered warnings).
+
     The returned :class:`GeoMosaicResult` covers the union extent;
     ``n_pings``/``n_uncovered`` are summed across the contributing files.
     """
     if on_uncovered not in ("skip", "clamp"):
         raise ValueError(f"on_uncovered must be 'skip' or 'clamp', got {on_uncovered!r}")
     mosaic = GeoMosaic(cell_m, reduce=reduce, depth_band=depth_band, altitude_band=altitude_band)
+
+    if workers and workers > 1:
+        return _build_composite_parallel(
+            paths, mosaic, workers=workers, nav_paths=nav_paths, install_paths=install_paths,
+            auto_companion=auto_companion, projector=projector, max_depth_m=max_depth_m,
+            on_uncovered=on_uncovered, coverage_tol_s=coverage_tol_s,
+            apply_attitude=apply_attitude, stabilized_beams=stabilized_beams,
+            limit=limit, allow_incomplete=allow_incomplete, verbose=verbose,
+        )
+
     anchor_ref: List[Optional[Tuple[float, float]]] = [None]
     total_uncovered = 0
     for p in paths:
@@ -1190,6 +1402,59 @@ def build_composite_mosaic(
     return result
 
 
+def _build_composite_parallel(
+    paths, mosaic, *, workers, nav_paths, install_paths, auto_companion, projector,
+    max_depth_m, on_uncovered, coverage_tol_s, apply_attitude, stabilized_beams,
+    limit, allow_incomplete, verbose,
+) -> GeoMosaicResult:
+    """Process-pool file-parallel composite; merges partials in file order."""
+    import warnings
+    from concurrent.futures import ProcessPoolExecutor
+
+    cfg = dict(
+        nav_paths=list(nav_paths) if nav_paths else None,
+        install_paths=list(install_paths) if install_paths else None,
+        auto_companion=auto_companion, cell_m=mosaic.cell_m, reduce=mosaic.reduce,
+        depth_band=mosaic.depth_band, altitude_band=mosaic.altitude_band,
+        projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
+        coverage_tol_s=coverage_tol_s, apply_attitude=apply_attitude,
+        stabilized_beams=stabilized_beams, limit=limit, allow_incomplete=allow_incomplete,
+    )
+    anchor = _first_kept_anchor(paths, cfg)
+    if anchor is None:  # no nav-resolvable file with a decodable ping
+        return mosaic.finalize()
+    cfg["anchor"] = anchor
+
+    total_uncovered = 0
+    tasks = [(str(p), cfg) for p in paths]
+    with ProcessPoolExecutor(max_workers=workers) as ex:
+        # ex.map preserves input (file) order -> order-stable mean.
+        for p, res in zip(paths, ex.map(_mosaic_worker, tasks)):
+            if res is None:
+                if verbose:
+                    print("SKIP", Path(p).name, "-> no navigation")
+                continue
+            mosaic.add_partial(
+                res["ie"], res["jn"], res["val"], res["cnt"],
+                n_pings=res["n_pings"], crs_label=res["crs_label"], epsg=res["epsg"],
+            )
+            total_uncovered += res["n_unc"]
+            if verbose:
+                status = f"skipped {res['n_unc']} uncovered" if res["n_unc"] else "all pings covered"
+                print(f"  + {Path(p).name}: nav={res['nav_source']}, {status}")
+            if res["n_unc"] and on_uncovered == "skip":
+                lo, hi = res["nav_span"]
+                warnings.warn(
+                    f"{Path(p).name}: {res['n_unc']} {res['kind']} ping(s) skipped — "
+                    f"nav track {res['nav_source']} spans [{lo:.0f},{hi:.0f}] but did not "
+                    f"cover their time(s); check that the nav file matches this file.",
+                    stacklevel=2,
+                )
+    result = mosaic.finalize()
+    result.n_uncovered = total_uncovered
+    return result
+
+
 def generate(
     output_dir,
     mwc_files: Sequence = (),
@@ -1210,6 +1475,7 @@ def generate(
     limit: Optional[int] = None,
     write_geotiff: bool = False,
     write_asc: bool = False,
+    workers: int = 1,
 ) -> List[Path]:
     """Build + render mosaic panel(s) from water-column files. Returns output paths.
 
@@ -1230,7 +1496,7 @@ def generate(
             depth_band=depth_band, altitude_band=altitude_band,
             projector=projector, max_depth_m=max_depth_m,
             on_uncovered=on_uncovered, apply_attitude=apply_attitude,
-            stabilized_beams=stabilized_beams, limit=limit, verbose=True,
+            stabilized_beams=stabilized_beams, limit=limit, workers=workers, verbose=True,
         )
         uncov = f", {result.n_uncovered} uncovered-skipped" if result.n_uncovered else ""
         print(f"OK   composite: {result.n_pings} pings, grid {result.amplitude_db.shape}, "
@@ -1330,6 +1596,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                          "angles — Kongsberg #MWC/k beamPointAngReVertical is already "
                          "roll/pitch-stabilized, so this double-corrects normal data.")
     ap.add_argument("--limit", type=int, default=None, help="Only the first N pings per file.")
+    ap.add_argument("--workers", type=int, default=1, metavar="N",
+                    help="With --combine, georeference the files across N processes (one file "
+                         "per task; default 1 = serial). The result is identical to serial.")
     ap.add_argument("--geotiff", action="store_true",
                     help="Also write a georeferenced GeoTIFF (needs --projector utm + rasterio; "
                          "pip install 'mbes-tools[geo]').")
@@ -1347,6 +1616,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         max_depth_m=args.max_depth_m, on_uncovered=args.on_uncovered,
         apply_attitude=not args.no_attitude, stabilized_beams=not args.unstabilized_beams,
         limit=args.limit, write_geotiff=args.geotiff, write_asc=args.asc,
+        workers=args.workers,
     )
     print(f"\nWrote {len(made)} mosaic output(s) to {args.output}")
 
