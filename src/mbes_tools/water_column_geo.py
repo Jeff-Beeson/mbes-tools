@@ -1026,6 +1026,7 @@ def _accumulate_into(
     apply_attitude: bool = True,
     stabilized_beams: bool = True,
     normalize: Optional[str] = None,
+    absorption_db_km: float = 0.0,
     clean_water: bool = False,
     msr_guard_m: float = 0.0,
     msr_percentile: float = 0.0,
@@ -1041,7 +1042,7 @@ def _accumulate_into(
     from mbes_tools.water_column import apply_min_slant_range
 
     lo, hi = nav.time_span
-    normalizer = frame_normalizer(normalize)
+    normalizer = frame_normalizer(normalize, absorption_db_km=absorption_db_km)
     n_uncovered = 0
     for i, item in enumerate(items):
         if limit is not None and i >= limit:
@@ -1088,6 +1089,7 @@ def _accumulate_mosaic(
     stabilized_beams: bool = True,
     altitude_band: Optional[Tuple[float, float]] = None,
     normalize: Optional[str] = None,
+    absorption_db_km: float = 0.0,
     clean_water: bool = False,
     msr_guard_m: float = 0.0,
     msr_percentile: float = 0.0,
@@ -1100,7 +1102,7 @@ def _accumulate_mosaic(
         mosaic, [None], items, time_fn, frame_fn, nav, install=install,
         projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
         coverage_tol_s=coverage_tol_s, limit=limit,
-        apply_attitude=apply_attitude, stabilized_beams=stabilized_beams, normalize=normalize,
+        apply_attitude=apply_attitude, stabilized_beams=stabilized_beams, normalize=normalize, absorption_db_km=absorption_db_km,
         clean_water=clean_water, msr_guard_m=msr_guard_m, msr_percentile=msr_percentile,
     )
     if n_uncovered and on_uncovered == "skip":
@@ -1130,6 +1132,7 @@ def build_mosaic_from_kmall(
     stabilized_beams: bool = True,
     limit: Optional[int] = None,
     normalize: Optional[str] = None,
+    absorption_db_km: float = 0.0,
     clean_water: bool = False,
     msr_guard_m: float = 0.0,
     msr_percentile: float = 0.0,
@@ -1159,7 +1162,7 @@ def build_mosaic_from_kmall(
     return _accumulate_mosaic(
         path, iter_mwc_datagrams(path), _mwc_time, frame_from_mwc, nav, install,
         kind="#MWC", cell_m=cell_m, reduce=reduce, depth_band=depth_band,
-        altitude_band=altitude_band, normalize=normalize,
+        altitude_band=altitude_band, normalize=normalize, absorption_db_km=absorption_db_km,
         clean_water=clean_water, msr_guard_m=msr_guard_m, msr_percentile=msr_percentile,
         projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
         coverage_tol_s=coverage_tol_s, limit=limit,
@@ -1188,6 +1191,7 @@ def build_mosaic_from_wcd(
     limit: Optional[int] = None,
     allow_incomplete: bool = False,
     normalize: Optional[str] = None,
+    absorption_db_km: float = 0.0,
     clean_water: bool = False,
     msr_guard_m: float = 0.0,
     msr_percentile: float = 0.0,
@@ -1215,7 +1219,7 @@ def build_mosaic_from_wcd(
     return _accumulate_mosaic(
         path, pings, lambda p: _all_header_time(p.header), frame_from_wcd, nav, install,
         kind="k", cell_m=cell_m, reduce=reduce, depth_band=depth_band,
-        altitude_band=altitude_band, normalize=normalize,
+        altitude_band=altitude_band, normalize=normalize, absorption_db_km=absorption_db_km,
         clean_water=clean_water, msr_guard_m=msr_guard_m, msr_percentile=msr_percentile,
         projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
         coverage_tol_s=coverage_tol_s, limit=limit,
@@ -1302,7 +1306,7 @@ def _mosaic_worker(args):
     kind, items, time_fn, frame_fn = _file_ping_source(path, allow_incomplete=cfg["allow_incomplete"])
     lo, hi = nav.time_span
     reduce = cfg["reduce"]
-    normalizer = frame_normalizer(cfg.get("normalize"))
+    normalizer = frame_normalizer(cfg.get("normalize"), absorption_db_km=cfg.get("absorption_db_km", 0.0))
     clean_water = cfg.get("clean_water", False)
     msr_guard_m = cfg.get("msr_guard_m", 0.0)
     msr_percentile = cfg.get("msr_percentile", 0.0)
@@ -1377,6 +1381,7 @@ def build_composite_mosaic(
     allow_incomplete: bool = False,
     workers: int = 1,
     normalize: Optional[str] = None,
+    absorption_db_km: float = 0.0,
     clean_water: bool = False,
     msr_guard_m: float = 0.0,
     msr_percentile: float = 0.0,
@@ -1410,7 +1415,7 @@ def build_composite_mosaic(
             auto_companion=auto_companion, projector=projector, max_depth_m=max_depth_m,
             on_uncovered=on_uncovered, coverage_tol_s=coverage_tol_s,
             apply_attitude=apply_attitude, stabilized_beams=stabilized_beams,
-            limit=limit, allow_incomplete=allow_incomplete, normalize=normalize,
+            limit=limit, allow_incomplete=allow_incomplete, normalize=normalize, absorption_db_km=absorption_db_km,
             clean_water=clean_water, msr_guard_m=msr_guard_m, msr_percentile=msr_percentile, verbose=verbose,
         )
 
@@ -1431,7 +1436,7 @@ def build_composite_mosaic(
             mosaic, anchor_ref, items, time_fn, frame_fn, nav, install=install,
             projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
             coverage_tol_s=coverage_tol_s, limit=limit,
-            apply_attitude=apply_attitude, stabilized_beams=stabilized_beams, normalize=normalize,
+            apply_attitude=apply_attitude, stabilized_beams=stabilized_beams, normalize=normalize, absorption_db_km=absorption_db_km,
             clean_water=clean_water, msr_guard_m=msr_guard_m, msr_percentile=msr_percentile,
         )
         total_uncovered += n_unc
@@ -1448,7 +1453,7 @@ def build_composite_mosaic(
 def _build_composite_parallel(
     paths, mosaic, *, workers, nav_paths, install_paths, auto_companion, projector,
     max_depth_m, on_uncovered, coverage_tol_s, apply_attitude, stabilized_beams,
-    limit, allow_incomplete, normalize, clean_water, msr_guard_m, msr_percentile, verbose,
+    limit, allow_incomplete, normalize, absorption_db_km, clean_water, msr_guard_m, msr_percentile, verbose,
 ) -> GeoMosaicResult:
     """Process-pool file-parallel composite; merges partials in file order."""
     import warnings
@@ -1462,7 +1467,7 @@ def _build_composite_parallel(
         projector=projector, max_depth_m=max_depth_m, on_uncovered=on_uncovered,
         coverage_tol_s=coverage_tol_s, apply_attitude=apply_attitude,
         stabilized_beams=stabilized_beams, limit=limit, allow_incomplete=allow_incomplete,
-        normalize=normalize, clean_water=clean_water, msr_guard_m=msr_guard_m, msr_percentile=msr_percentile,
+        normalize=normalize, absorption_db_km=absorption_db_km, clean_water=clean_water, msr_guard_m=msr_guard_m, msr_percentile=msr_percentile,
     )
     anchor = _first_kept_anchor(paths, cfg)
     if anchor is None:  # no nav-resolvable file with a decodable ping
@@ -1521,6 +1526,7 @@ def generate(
     write_asc: bool = False,
     workers: int = 1,
     normalize: Optional[str] = None,
+    absorption_db_km: float = 0.0,
     clean_water: bool = False,
     msr_guard_m: float = 0.0,
     msr_percentile: float = 0.0,
@@ -1545,7 +1551,7 @@ def generate(
             projector=projector, max_depth_m=max_depth_m,
             on_uncovered=on_uncovered, apply_attitude=apply_attitude,
             stabilized_beams=stabilized_beams, limit=limit, workers=workers,
-            normalize=normalize, clean_water=clean_water, msr_guard_m=msr_guard_m, msr_percentile=msr_percentile, verbose=True,
+            normalize=normalize, absorption_db_km=absorption_db_km, clean_water=clean_water, msr_guard_m=msr_guard_m, msr_percentile=msr_percentile, verbose=True,
         )
         uncov = f", {result.n_uncovered} uncovered-skipped" if result.n_uncovered else ""
         print(f"OK   composite: {result.n_pings} pings, grid {result.amplitude_db.shape}, "
@@ -1574,7 +1580,7 @@ def generate(
                 altitude_band=altitude_band,
                 projector=projector, max_depth_m=max_depth_m,
                 on_uncovered=on_uncovered, apply_attitude=apply_attitude,
-                stabilized_beams=stabilized_beams, limit=limit, normalize=normalize,
+                stabilized_beams=stabilized_beams, limit=limit, normalize=normalize, absorption_db_km=absorption_db_km,
                 clean_water=clean_water, msr_guard_m=msr_guard_m, msr_percentile=msr_percentile,
             )
         except Exception as exc:  # noqa: BLE001
@@ -1649,11 +1655,17 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     ap.add_argument("--workers", type=int, default=1, metavar="N",
                     help="With --combine, georeference the files across N processes (one file "
                          "per task; default 1 = serial). The result is identical to serial.")
-    ap.add_argument("--normalize", choices=["none", "empirical"], default="none",
-                    help="Remove acquisition gain before gridding: 'empirical' de-trends each "
-                         "ping's amplitude over the open water (per-range TVG/absorption + "
-                         "per-beam-angle beam-pattern, via median polish), so real midwater/plume "
-                         "structure stands out. Relative dB, not calibrated Sv. Default none.")
+    ap.add_argument("--normalize", choices=["none", "empirical", "sv"], default="none",
+                    help="Remove acquisition gain before gridding. 'empirical': de-trend each "
+                         "ping over the open water (per-range + per-beam-angle, median polish). "
+                         "'sv': re-express as relative volume-scattering Sv — undo the applied "
+                         "X·logR TVG and re-apply the 20·logR volume law (+ 2·alpha·R if "
+                         "--absorption given). Both are relative dB, not absolutely calibrated Sv. "
+                         "Default none.")
+    ap.add_argument("--absorption", type=float, default=0.0, metavar="DB_PER_KM",
+                    help="Absorption coefficient (dB/km) for --normalize sv (adds 2·alpha·R). "
+                         "#MWC/k don't record it; supply the survey value (default 0 = spreading "
+                         "law only). Matters in deep water at high frequency.")
     ap.add_argument("--clean-water", action="store_true",
                     help="Keep only the bottom-sidelobe-free water column: drop samples at/beyond "
                          "each ping's minimum bottom-detect slant range (the nadir range), where "
@@ -1683,7 +1695,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         max_depth_m=args.max_depth_m, on_uncovered=args.on_uncovered,
         apply_attitude=not args.no_attitude, stabilized_beams=not args.unstabilized_beams,
         limit=args.limit, write_geotiff=args.geotiff, write_asc=args.asc,
-        workers=args.workers, normalize=args.normalize,
+        workers=args.workers, normalize=args.normalize, absorption_db_km=args.absorption,
         clean_water=args.clean_water, msr_guard_m=args.msr_guard_m,
         msr_percentile=args.msr_percentile,
     )
