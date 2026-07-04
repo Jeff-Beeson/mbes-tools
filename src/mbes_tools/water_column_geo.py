@@ -48,7 +48,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
@@ -796,6 +796,56 @@ def panel_mosaic(result: GeoMosaicResult, out: Path, stem: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Gap fill (nodata interpolation).
+# ---------------------------------------------------------------------------
+
+
+def fill_mosaic_nodata(result: GeoMosaicResult, max_distance_cells: int) -> GeoMosaicResult:
+    """Interpolate empty cells up to ``max_distance_cells`` from real coverage.
+
+    Small holes — left by a thin ``--altitude-band``/``--clean-water`` selection, a
+    fine cell size, or along-track sampling — are filled by iteratively averaging
+    each empty cell's finite 8-neighbours in the **linear-intensity** domain (so the
+    fill is radiometrically sensible, not a dB average), one ring per iteration.
+    After ``max_distance_cells`` rings, voids wider than that stay ``NaN`` — the
+    fill never invents coverage far from data. Filled cells keep ``counts == 0``, so
+    interpolated cells remain distinguishable from observed ones. ``0`` (or an
+    all-empty grid) returns the result unchanged. Pure numpy — no extra deps.
+    """
+    if max_distance_cells <= 0:
+        return result
+    amp = result.amplitude_db
+    finite = np.isfinite(amp)
+    if not finite.any() or finite.all():
+        return result
+
+    lin = np.where(finite, np.power(10.0, amp / 10.0), 0.0)
+    filled = finite.copy()
+    offsets = [(dy, dx) for dy in (-1, 0, 1) for dx in (-1, 0, 1) if (dy, dx) != (0, 0)]
+    h, w = amp.shape
+    for _ in range(int(max_distance_cells)):
+        holes = ~filled
+        if not holes.any():
+            break
+        val = np.pad(np.where(filled, lin, 0.0), 1)
+        cnt = np.pad(filled.astype(np.float64), 1)
+        nsum = np.zeros((h, w))
+        ncnt = np.zeros((h, w))
+        for dy, dx in offsets:
+            nsum += val[1 + dy: 1 + dy + h, 1 + dx: 1 + dx + w]
+            ncnt += cnt[1 + dy: 1 + dy + h, 1 + dx: 1 + dx + w]
+        newly = holes & (ncnt > 0)
+        if not newly.any():
+            break  # remaining holes are unreachable
+        lin[newly] = nsum[newly] / ncnt[newly]
+        filled = filled | newly
+
+    out = np.full(amp.shape, np.nan)
+    out[filled] = 10.0 * np.log10(lin[filled])
+    return replace(result, amplitude_db=out)
+
+
+# ---------------------------------------------------------------------------
 # Raster export: GeoTIFF (rasterio, optional) + ESRI ASCII Grid (numpy-only).
 # ---------------------------------------------------------------------------
 
@@ -1530,6 +1580,7 @@ def generate(
     clean_water: bool = False,
     msr_guard_m: float = 0.0,
     msr_percentile: float = 0.0,
+    fill_nodata: int = 0,
 ) -> List[Path]:
     """Build + render mosaic panel(s) from water-column files. Returns output paths.
 
@@ -1556,6 +1607,8 @@ def generate(
         uncov = f", {result.n_uncovered} uncovered-skipped" if result.n_uncovered else ""
         print(f"OK   composite: {result.n_pings} pings, grid {result.amplitude_db.shape}, "
               f"{int(result.counts.sum())} samples{uncov}, {result.crs_label}")
+        if fill_nodata:
+            result = fill_mosaic_nodata(result, fill_nodata)
         stem = f"composite_{len(files)}files"
         made: List[Path] = []
         try:
@@ -1590,6 +1643,8 @@ def generate(
         print(f"OK   {stem}: {result.n_pings} pings, grid {result.amplitude_db.shape}, "
               f"{int(result.counts.sum())} samples, nav={nav.position_source}/{nav.heading_source}{uncov}, "
               f"{result.crs_label}")
+        if fill_nodata:
+            result = fill_mosaic_nodata(result, fill_nodata)
         try:
             made.append(panel_mosaic(result, out, stem))
         except Exception as exc:  # noqa: BLE001
@@ -1639,6 +1694,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                          "(e.g. 20:200 for a near-bottom layer that tracks the terrain). Beams with no "
                          "bottom detection are excluded. Composes with --depth-band (both must hold).")
     ap.add_argument("--max-depth-m", type=float, default=None, help="Drop samples deeper than this.")
+    ap.add_argument("--fill-nodata", type=int, default=0, metavar="N",
+                    help="Interpolate empty cells up to N cells from real coverage (8-neighbour "
+                         "linear-intensity mean, N rings; wider voids stay nodata). Fills the small "
+                         "holes left by a thin --altitude-band/--clean-water or a fine --cell-m. "
+                         "Filled cells keep count 0 (distinguishable from observed). Default 0 = off.")
     ap.add_argument("--projector", choices=["auto", "utm", "local"], default="auto",
                     help="Coordinate frame: auto (UTM if pyproj else local ENU), utm, or local.")
     ap.add_argument("--on-uncovered", choices=["skip", "clamp"], default="skip",
@@ -1697,7 +1757,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         limit=args.limit, write_geotiff=args.geotiff, write_asc=args.asc,
         workers=args.workers, normalize=args.normalize, absorption_db_km=args.absorption,
         clean_water=args.clean_water, msr_guard_m=args.msr_guard_m,
-        msr_percentile=args.msr_percentile,
+        msr_percentile=args.msr_percentile, fill_nodata=args.fill_nodata,
     )
     print(f"\nWrote {len(made)} mosaic output(s) to {args.output}")
 

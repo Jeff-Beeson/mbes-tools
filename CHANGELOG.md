@@ -4,6 +4,28 @@ All notable changes to `mbes-tools` are documented here. The project follows
 [semantic versioning](https://semver.org/) (currently 0.x — minor versions may
 add features; the public API is kept backward compatible where practical).
 
+## [0.19.0] - 2026-07-04
+
+### Added (water-column mosaic — nodata gap fill)
+- **`mbes-wc-mosaic --fill-nodata N`** — interpolate empty cells up to `N` cells
+  from real coverage, so the small holes left by a thin `--altitude-band` /
+  `--clean-water` selection, a fine `--cell-m`, or along-track sampling close up
+  without a separate post-processing step. Each empty cell adjacent to data is
+  filled with the **linear-intensity mean** of its finite 8-neighbours (so the
+  fill is radiometrically sensible, not a dB average), one ring per iteration for
+  `N` iterations; voids wider than `N` cells stay nodata (the fill never invents
+  coverage far from data). Applied to the finalized mosaic before every output
+  (PNG / GeoTIFF / `.asc`), for both the per-file and `--combine` paths.
+- **Filled cells keep `counts == 0`**, so interpolated cells stay distinguishable
+  from observed ones in the `counts` band / `GeoMosaicResult`.
+- Pure numpy — **no extra dependency** (works in the base env). Exposed as
+  `mbes_tools.water_column_geo.fill_mosaic_nodata(result, max_distance_cells)`.
+- **Verified:** synthetic grids fill a 1-cell hole to the exact linear mean, stay
+  distance-bounded (a 3-cell-away hole fills only at `N≥3`), leave observed cells
+  untouched, and are an identity at `N=0`; on the real EM304 H14070 a holey
+  clean-water + altitude selection grows 1155 → 1523 / 1814 / 2346 finite cells at
+  `N=1/2/4` with observed cells unchanged. 5 new tests.
+
 ## [0.18.0] - 2026-07-04
 
 ### Added (water-column — relative-Sv normalization)
