@@ -1040,3 +1040,71 @@ def test_normalize_sv_parallel_matches_serial():
         np.nan_to_num(serial.amplitude_db, nan=-999),
         np.nan_to_num(parallel.amplitude_db, nan=-999),
     )
+
+
+# ---------------------------------------------------------------------------
+# 11. Gap fill / nodata interpolation (--fill-nodata).
+# ---------------------------------------------------------------------------
+
+
+def _grid_result(amp):
+    amp = np.asarray(amp, float)
+    h, w = amp.shape
+    return wg.GeoMosaicResult(
+        amplitude_db=amp, counts=np.where(np.isfinite(amp), 1, 0).astype(int),
+        east_edges=np.arange(w + 1.0), north_edges=np.arange(h + 1.0),
+        cell_m=1.0, reduce="mean", crs_label="test", n_pings=1, depth_band=None,
+    )
+
+
+def test_fill_nodata_fills_small_hole_keeps_count_zero():
+    amp = np.full((5, 5), -20.0)
+    amp[2, 2] = np.nan
+    out = wg.fill_mosaic_nodata(_grid_result(amp), 1)
+    assert out.amplitude_db[2, 2] == pytest.approx(-20.0)   # linear mean of equal neighbours
+    assert out.counts[2, 2] == 0                            # interpolated, not observed
+
+
+def test_fill_nodata_is_distance_bounded():
+    amp = np.full((7, 7), np.nan)
+    amp[0, :] = -30.0                                       # only the top row has data
+    r = _grid_result(amp)
+    near = wg.fill_mosaic_nodata(r, 1)
+    far = wg.fill_mosaic_nodata(r, 3)
+    assert np.isfinite(near.amplitude_db[1, 3])            # 1 cell away -> filled at dist 1
+    assert not np.isfinite(near.amplitude_db[3, 3])        # 3 cells away -> still nodata
+    assert np.isfinite(far.amplitude_db[3, 3])            # reached at dist 3
+
+
+def test_fill_nodata_zero_is_identity():
+    amp = np.array([[-20.0, np.nan], [np.nan, -22.0]])
+    out = wg.fill_mosaic_nodata(_grid_result(amp), 0)
+    np.testing.assert_array_equal(np.nan_to_num(out.amplitude_db, nan=-999),
+                                  np.nan_to_num(amp, nan=-999))
+
+
+def test_fill_nodata_averages_in_linear_domain():
+    # Two neighbours -10 and -20 dB: linear mean -> 10log10((0.1+0.01)/2) ≈ -12.6 dB,
+    # which is > the dB mean (-15), confirming linear-domain averaging.
+    amp = np.array([[-10.0, np.nan, -20.0]])
+    out = wg.fill_mosaic_nodata(_grid_result(amp), 1)
+    expected = 10 * np.log10((10 ** (-1.0) + 10 ** (-2.0)) / 2)
+    assert out.amplitude_db[0, 1] == pytest.approx(expected)
+    assert out.amplitude_db[0, 1] > -15.0
+
+
+def test_generate_fill_nodata_reduces_holes(tmp_path):
+    """End-to-end: --fill-nodata leaves >= as many finite cells as the raw mosaic,
+    written into the .asc raster."""
+    fx = FIXTURES / "sample_tn447_em124.kmwcd"
+    if not fx.exists():
+        pytest.skip("kmwcd fixture not present")
+    raw = wg.build_mosaic_from_kmall(fx, projector="local", cell_m=25.0,
+                                     auto_companion=False, on_uncovered="clamp")
+    n_raw = int(np.isfinite(raw.amplitude_db).sum())
+    filled = wg.fill_mosaic_nodata(raw, 2)
+    n_filled = int(np.isfinite(filled.amplitude_db).sum())
+    assert n_filled >= n_raw
+    # Observed cells are unchanged; only NaNs may become finite.
+    obs = np.isfinite(raw.amplitude_db)
+    np.testing.assert_allclose(filled.amplitude_db[obs], raw.amplitude_db[obs])

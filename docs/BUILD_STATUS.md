@@ -41,10 +41,13 @@ beam; `mbes_tools.water_column.apply_min_slant_range`) at **v0.17.0**, and **Sli
 — relative-`Sv` normalization** (`--normalize sv` [+ `--absorption`] on all three
 products: undo the applied `X·logR` TVG — `X`=`TVGfunctionApplied`, validated
 against the Kongsberg KMALL spec — and re-apply the `20·logR` volume law + `2αR`;
-relative dB, absolute `Sv` unreachable from these files) at **v0.18.0** (**283
-passed / 3 skipped**). The catalog EM-model rewire also merged (v0.16.1). The
-optional-GPU path was dropped by request. **D2** (native GSF reader) is now the top
-of the backlog below.
+relative dB, absolute `Sv` unreachable from these files) at **v0.18.0**, and
+**Slice 7 — nodata gap fill** (`mbes-wc-mosaic --fill-nodata N`: distance-bounded
+8-neighbour linear-intensity interpolation of empty cells, numpy-only, filled
+cells keep `count 0`; `water_column_geo.fill_mosaic_nodata`) at **v0.19.0**
+(**288 passed / 3 skipped**). The catalog EM-model rewire also merged (v0.16.1).
+The optional-GPU path was dropped by request. **D2** (native GSF reader) is now the
+top of the backlog below.
 
 > Read this together with `docs/UPGRADE_PLAN.md` (the spec),
 > `docs/VERIFICATION_DATA.md` (the real-data corpus + how to regenerate the
